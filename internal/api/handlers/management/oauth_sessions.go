@@ -29,12 +29,13 @@ var (
 )
 
 type oauthSession struct {
-	Provider  string
-	Status    string
-	Source    string
-	Metadata  map[string]any
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Provider      string
+	Status        string
+	Source        string
+	Metadata      map[string]any
+	PrivateKeyDer []byte
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
 }
 
 type oauthSessionStore struct {
@@ -61,24 +62,29 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *oauthSessionStore) Register(state, provider string) {
+func (s *oauthSessionStore) Register(state, provider string, privateKeyDer ...[]byte) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
 		return
 	}
 	now := time.Now()
+	var pkDer []byte
+	if len(privateKeyDer) > 0 {
+		pkDer = privateKeyDer[0]
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
 	s.sessions[state] = oauthSession{
-		Provider:  provider,
-		Status:    "",
-		Source:    oauthSessionSourceBuiltin,
-		CreatedAt: now,
-		ExpiresAt: now.Add(s.ttl),
+		Provider:      provider,
+		Status:        "",
+		Source:        oauthSessionSourceBuiltin,
+		PrivateKeyDer: pkDer,
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(s.ttl),
 	}
 }
 
@@ -227,7 +233,7 @@ func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
-func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+func RegisterOAuthSession(state, provider string, privateKeyDer ...[]byte) { oauthSessions.Register(state, provider, privateKeyDer...) }
 
 func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
 	return oauthSessions.RegisterPlugin(state, provider, metadata)

@@ -27,6 +27,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
@@ -36,8 +37,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/mimofree"
+	openaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/openaiprovider"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
+	qwenauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qwen"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	xiaomimimoauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xiaomimimo"
+	xiaomitokenplanauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xiaomitokenplan"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -4546,6 +4552,572 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"status": "ok",
 		"url":    authParams.LoginURL,
+		"state":  state,
+	})
+}
+
+func (h *Handler) RequestQwenToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Qwen authentication...")
+
+	state := fmt.Sprintf("qwn-%d", time.Now().UnixNano())
+	authSvc := qwenauth.NewQwenAuth(h.cfg)
+
+	deviceCode, err := authSvc.StartDeviceFlow(ctx)
+	if err != nil {
+		log.Errorf("Failed to initiate device flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
+		return
+	}
+
+	verificationURL := deviceCode.VerificationURIComplete
+	if verificationURL == "" {
+		verificationURL = deviceCode.VerificationURI
+	}
+
+	RegisterOAuthSession(state, "qwen")
+
+	go func() {
+		fmt.Printf("Please visit %s and enter code: %s\n", verificationURL, deviceCode.UserCode)
+		fmt.Println("Waiting for authorization...")
+
+		authBundle, errWait := authSvc.WaitForAuthorization(ctx, deviceCode)
+		if errWait != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errWait)
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(authBundle)
+
+		metadata := map[string]any{
+			"type":          "qwen",
+			"access_token":  authBundle.TokenData.AccessToken,
+			"refresh_token": authBundle.TokenData.RefreshToken,
+			"token_type":    authBundle.TokenData.TokenType,
+			"scope":         authBundle.TokenData.Scope,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		if authBundle.TokenData.ExpiresAt > 0 {
+			metadata["expired"] = time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		}
+		if strings.TrimSpace(authBundle.DeviceID) != "" {
+			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
+		}
+
+		fileName := fmt.Sprintf("qwen-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "qwen",
+			FileName: fileName,
+			Label:    "Qwen User",
+			Storage:  tokenStorage,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Qwen services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("qwen")
+	}()
+
+	c.JSON(200, gin.H{
+		"status":           "ok",
+		"url":              verificationURL,
+		"state":            state,
+		"user_code":        deviceCode.UserCode,
+		"verification_uri": deviceCode.VerificationURI,
+	})
+}
+
+func (h *Handler) RequestOpenAIToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing OpenAI authentication...")
+
+	state := fmt.Sprintf("oai-%d", time.Now().UnixNano())
+
+	pkceCodes, err := openaiauth.GeneratePKCECodes()
+	if err != nil {
+		log.Errorf("Failed to generate PKCE codes: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	oauthServer := openaiauth.NewOAuthServer(1455)
+	if errStart := oauthServer.Start(); errStart != nil {
+		log.Errorf("Failed to start OAuth server: %v", errStart)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start OAuth server"})
+		return
+	}
+
+	authSvc := openaiauth.NewOpenAIAuth(h.cfg)
+	authURL, errURL := authSvc.GenerateAuthURL(state, pkceCodes)
+	if errURL != nil {
+		log.Errorf("Failed to generate auth URL: %v", errURL)
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelStop()
+		_ = oauthServer.Stop(stopCtx)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth URL"})
+		return
+	}
+
+	RegisterOAuthSession(state, "openai")
+
+	go func() {
+		defer func() {
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancelStop()
+			if errStop := oauthServer.Stop(stopCtx); errStop != nil {
+				log.Warnf("OAuth server stop error: %v", errStop)
+			}
+		}()
+
+		fmt.Println("Waiting for OpenAI authentication callback...")
+
+		result, errWait := oauthServer.WaitForCallback(5 * time.Minute)
+		if errWait != nil {
+			SetOAuthSessionError(state, "Authentication failed: "+errWait.Error())
+			fmt.Printf("Authentication failed: %v\n", errWait)
+			return
+		}
+
+		if result.Error != "" {
+			SetOAuthSessionError(state, "Authentication failed: "+result.Error)
+			fmt.Printf("Authentication failed: %s\n", result.Error)
+			return
+		}
+
+		bundle, errExchange := authSvc.ExchangeCodeForTokens(ctx, result.Code, pkceCodes)
+		if errExchange != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errExchange)
+			return
+		}
+
+		tokenStorage := &openaiauth.OpenAITokenStorage{
+			IDToken:      bundle.TokenData.IDToken,
+			AccessToken:  bundle.TokenData.AccessToken,
+			RefreshToken: bundle.TokenData.RefreshToken,
+			AccountID:    bundle.TokenData.AccountID,
+			Email:        bundle.TokenData.Email,
+			LastRefresh:  bundle.LastRefresh,
+			Type:         "openai",
+			Expire:       bundle.TokenData.Expire,
+		}
+
+		identifier := strings.TrimSpace(bundle.TokenData.Email)
+		if identifier == "" {
+			identifier = bundle.TokenData.AccountID
+		}
+		if identifier == "" {
+			identifier = fmt.Sprintf("%d", time.Now().UnixMilli())
+		}
+
+		fileName := openaiauth.CredentialFileName(identifier, "", "", true)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "openai",
+			FileName: fileName,
+			Label:    identifier,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":          "openai",
+				"access_token":  bundle.TokenData.AccessToken,
+				"refresh_token": bundle.TokenData.RefreshToken,
+				"account_id":    bundle.TokenData.AccountID,
+				"email":         bundle.TokenData.Email,
+				"timestamp":     time.Now().UnixMilli(),
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use OpenAI services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("openai")
+	}()
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"url":    authURL,
+		"state":  state,
+	})
+}
+
+func (h *Handler) RequestClineToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Cline authentication...")
+
+	state := fmt.Sprintf("cln-%d", time.Now().UnixNano())
+	authSvc := clineauth.NewClineAuth(h.cfg)
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/auth/callback", 1455)
+
+	authURL, errURL := authSvc.GenerateAuthURL(redirectURI)
+	if errURL != nil {
+		log.Errorf("Failed to generate auth URL: %v", errURL)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth URL"})
+		return
+	}
+
+	oauthServer := clineauth.NewOAuthServer(1455)
+	if errStart := oauthServer.Start(); errStart != nil {
+		log.Errorf("Failed to start OAuth server: %v", errStart)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start OAuth server"})
+		return
+	}
+
+	RegisterOAuthSession(state, "cline")
+
+	go func() {
+		defer func() {
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancelStop()
+			if errStop := oauthServer.Stop(stopCtx); errStop != nil {
+				log.Warnf("OAuth server stop error: %v", errStop)
+			}
+		}()
+
+		fmt.Println("Waiting for Cline authentication callback...")
+
+		result, errWait := oauthServer.WaitForCallback(5 * time.Minute)
+		if errWait != nil {
+			SetOAuthSessionError(state, "Authentication failed: "+errWait.Error())
+			fmt.Printf("Authentication failed: %v\n", errWait)
+			return
+		}
+
+		if result.Error != "" {
+			SetOAuthSessionError(state, "Authentication failed: "+result.Error)
+			fmt.Printf("Authentication failed: %s\n", result.Error)
+			return
+		}
+
+		bundle, errExchange := authSvc.ExchangeCodeForTokens(ctx, result.Code, redirectURI)
+		if errExchange != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errExchange)
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+
+		identifier := strings.TrimSpace(bundle.TokenData.Email)
+		if identifier == "" {
+			identifier = fmt.Sprintf("%d", time.Now().UnixMilli())
+		}
+
+		fileName := fmt.Sprintf("cline-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "cline",
+			FileName: fileName,
+			Label:    identifier,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":          "cline",
+				"access_token":  bundle.TokenData.AccessToken,
+				"refresh_token": bundle.TokenData.RefreshToken,
+				"email":         bundle.TokenData.Email,
+				"timestamp":     time.Now().UnixMilli(),
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Cline services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("cline")
+	}()
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"url":    authURL,
+		"state":  state,
+	})
+}
+
+func (h *Handler) RequestXiaomiMimoToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Xiaomi MiMo authentication...")
+
+	state := fmt.Sprintf("xmi-%d", time.Now().UnixNano())
+
+	publicKey, privateKeyDer, errKeyPair := xiaomimimoauth.GenerateKeyPair()
+	if errKeyPair != nil {
+		log.Errorf("Failed to generate key pair: %v", errKeyPair)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate key pair"})
+		return
+	}
+
+	keyName := xiaomimimoauth.GenerateKeyName()
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/", xiaomimimoauth.CallbackPort)
+	authURL := xiaomimimoauth.BuildAuthorizeURL(publicKey, redirectURI, keyName)
+
+	RegisterOAuthSession(state, "xiaomi-mimo", privateKeyDer)
+
+	codeCh := make(chan string, 1)
+	oauthServer, errStart := xiaomimimoauth.StartOAuthServer(xiaomimimoauth.CallbackPort, func(code string) {
+		codeCh <- code
+	})
+	if errStart != nil {
+		log.Errorf("Failed to start OAuth server: %v", errStart)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start OAuth server"})
+		return
+	}
+
+	go func() {
+		defer func() {
+			shutdownCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancelStop()
+			if errShutdown := oauthServer.Shutdown(shutdownCtx); errShutdown != nil {
+				log.Warnf("Xiaomi MiMo OAuth server shutdown error: %v", errShutdown)
+			}
+		}()
+
+		fmt.Println("Waiting for Xiaomi MiMo authorization...")
+
+		var encryptedBase64 string
+		select {
+		case encryptedBase64 = <-codeCh:
+		case <-ctx.Done():
+			SetOAuthSessionError(state, "Authentication cancelled")
+			return
+		case <-time.After(15 * time.Minute):
+			SetOAuthSessionError(state, "Authentication failed: timeout")
+			fmt.Println("Authentication failed: timeout")
+			return
+		}
+
+		sk, uid, baseURL, errDecrypt := xiaomimimoauth.Decrypt(privateKeyDer, encryptedBase64)
+		if errDecrypt != nil {
+			SetOAuthSessionError(state, "Authentication failed: decrypt error")
+			fmt.Printf("Authentication failed: %v\n", errDecrypt)
+			return
+		}
+
+		if baseURL == "" {
+			baseURL = xiaomimimoauth.PlatformURL
+		}
+
+		tokenStorage := &xiaomimimoauth.XiaomiMimoTokenStorage{
+			AccessToken: sk,
+			SK:          sk,
+			UID:         uid,
+			BaseURL:     baseURL,
+			TokenType:   "Bearer",
+			Type:        "xiaomi-mimo",
+			Expired:     time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339),
+		}
+
+		identifier := strings.TrimSpace(uid)
+		if identifier == "" {
+			identifier = "Xiaomi MiMo User"
+		}
+
+		fileName := fmt.Sprintf("xiaomi-mimo-%s-%d.json", uid, time.Now().Unix())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "xiaomi-mimo",
+			FileName: fileName,
+			Label:    identifier,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":       "xiaomi-mimo",
+				"sk":         sk,
+				"uid":        uid,
+				"base_url":   baseURL,
+				"token_type": "Bearer",
+				"expired":    tokenStorage.Expired,
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Xiaomi MiMo services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("xiaomi-mimo")
+	}()
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"url":    authURL,
+		"state":  state,
+	})
+}
+
+func (h *Handler) RequestXiaomiTokenPlanToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Xiaomi TokenPlan authentication...")
+
+	state := fmt.Sprintf("xtp-%d", time.Now().UnixNano())
+	RegisterOAuthSession(state, "xiaomi-tokenplan")
+
+	go func() {
+		fmt.Println("Xiaomi TokenPlan requires an API key.")
+		fmt.Println("Please use the --api-key flag or provide it via the management UI.")
+
+		apiKey := ""
+		region := xiaomitokenplanauth.DefaultRegion
+
+		if apiKey == "" {
+			SetOAuthSessionError(state, "API key required - use --api-key flag")
+			fmt.Println("API key is required for Xiaomi TokenPlan")
+			return
+		}
+
+		baseURL := xiaomitokenplanauth.RegionBaseURL(region)
+		tokenStorage := &xiaomitokenplanauth.XiaomiTokenPlanStorage{
+			APIKey:  apiKey,
+			Region:  region,
+			BaseURL: baseURL,
+			Type:    "xiaomi-tokenplan",
+		}
+
+		fileName := fmt.Sprintf("xiaomi-tokenplan-%d.json", time.Now().Unix())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "xiaomi-tokenplan",
+			FileName: fileName,
+			Label:    fmt.Sprintf("Xiaomi TokenPlan (%s)", region),
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":     "xiaomi-tokenplan",
+				"api_key":  apiKey,
+				"region":   region,
+				"base_url": baseURL,
+			},
+			Attributes: map[string]string{
+				"api_key":  apiKey,
+				"base_url": baseURL,
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("xiaomi-tokenplan")
+	}()
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"state":  state,
+	})
+}
+
+func (h *Handler) RequestMimoFreeToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing MiMo Free authentication...")
+
+	state := fmt.Sprintf("mf-%d", time.Now().UnixNano())
+	RegisterOAuthSession(state, "mimo-free")
+
+	go func() {
+		deviceID := mimofree.GenerateDeviceID()
+		fmt.Printf("Bootstrapping MiMo Free with device ID: %s\n", deviceID)
+
+		bootstrapResp, errBootstrap := mimofree.Bootstrap(ctx, deviceID)
+		if errBootstrap != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errBootstrap)
+			return
+		}
+
+		baseURL := bootstrapResp.BaseURL
+		if baseURL == "" {
+			baseURL = mimofree.PlatformURL
+		}
+
+		expired := ""
+		if bootstrapResp.ExpiresIn > 0 {
+			expired = time.Now().Add(time.Duration(bootstrapResp.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+		}
+
+		tokenStorage := &mimofree.MimoFreeTokenStorage{
+			AccessToken:  bootstrapResp.AccessToken,
+			RefreshToken: bootstrapResp.RefreshToken,
+			TokenType:    bootstrapResp.TokenType,
+			Expired:      expired,
+			Type:         "mimo-free",
+			BaseURL:      baseURL,
+			DeviceID:     deviceID,
+		}
+
+		fileName := fmt.Sprintf("mimo-free-%s-%d.json", deviceID, time.Now().Unix())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "mimo-free",
+			FileName: fileName,
+			Label:    "MiMo Free",
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":          "mimo-free",
+				"access_token":  bootstrapResp.AccessToken,
+				"refresh_token": bootstrapResp.RefreshToken,
+				"token_type":    bootstrapResp.TokenType,
+				"base_url":      baseURL,
+				"device_id":     deviceID,
+				"expired":       expired,
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use MiMo Free services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("mimo-free")
+	}()
+
+	c.JSON(200, gin.H{
+		"status": "ok",
 		"state":  state,
 	})
 }
