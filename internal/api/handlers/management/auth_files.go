@@ -5008,7 +5008,8 @@ func (h *Handler) XiaomiMimoCallback(c *gin.Context) {
 
 	sk, uid, baseURL, errDecrypt := xiaomimimoauth.Decrypt(session.PrivateKeyDer, req.Code)
 	if errDecrypt != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "decryption failed: " + errDecrypt.Error()})
+		log.Errorf("Xiaomi MiMo decrypt failed: %v", errDecrypt)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "decryption failed - invalid or corrupted code"})
 		return
 	}
 
@@ -5061,9 +5062,10 @@ func (h *Handler) XiaomiMimoCallback(c *gin.Context) {
 	CompleteOAuthSession(req.State)
 	CompleteOAuthSessionsByProvider("xiaomi-mimo")
 
+	log.Infof("Xiaomi MiMo token saved to %s", savedPath)
 	c.JSON(200, gin.H{
-		"status": "ok",
-		"message": fmt.Sprintf("Authentication successful! Token saved to %s", savedPath),
+		"status":  "ok",
+		"message": "Xiaomi MiMo authentication successful",
 	})
 }
 
