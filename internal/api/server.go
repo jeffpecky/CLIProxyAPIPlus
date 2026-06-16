@@ -600,6 +600,62 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	s.engine.GET("/qwen/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "qwen", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/openai/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "openai", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/cline/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "cline", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/xiaomi-mimo/callback", func(c *gin.Context) {
+		code := c.Query("u")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xiaomi-mimo", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
@@ -820,6 +876,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
+		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
+		mgmt.GET("/openai-auth-url", s.mgmt.RequestOpenAIToken)
+		mgmt.GET("/cline-auth-url", s.mgmt.RequestClineToken)
+		mgmt.GET("/xiaomi-mimo-auth-url", s.mgmt.RequestXiaomiMimoToken)
+		mgmt.POST("/xiaomi-mimo-callback", s.mgmt.XiaomiMimoCallback)
+		mgmt.GET("/xiaomi-tokenplan-auth-url", s.mgmt.RequestXiaomiTokenPlanToken)
+		mgmt.GET("/mimo-free-auth-url", s.mgmt.RequestMimoFreeToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
