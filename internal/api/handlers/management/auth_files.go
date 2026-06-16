@@ -4978,6 +4978,95 @@ func (h *Handler) RequestXiaomiMimoToken(c *gin.Context) {
 	})
 }
 
+func (h *Handler) XiaomiMimoCallback(c *gin.Context) {
+	var req struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if req.Code == "" || req.State == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code and state are required"})
+		return
+	}
+
+	session, ok := oauthSessions.Get(req.State)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found or expired"})
+		return
+	}
+	if session.Provider != "xiaomi-mimo" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid provider for this session"})
+		return
+	}
+	if len(session.PrivateKeyDer) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "private key not available"})
+		return
+	}
+
+	sk, uid, baseURL, errDecrypt := xiaomimimoauth.Decrypt(session.PrivateKeyDer, req.Code)
+	if errDecrypt != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "decryption failed: " + errDecrypt.Error()})
+		return
+	}
+
+	if baseURL == "" {
+		baseURL = xiaomimimoauth.PlatformURL
+	}
+
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	tokenStorage := &xiaomimimoauth.XiaomiMimoTokenStorage{
+		AccessToken: sk,
+		SK:          sk,
+		UID:         uid,
+		BaseURL:     baseURL,
+		TokenType:   "Bearer",
+		Type:        "xiaomi-mimo",
+		Expired:     time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339),
+	}
+
+	identifier := strings.TrimSpace(uid)
+	if identifier == "" {
+		identifier = "Xiaomi MiMo User"
+	}
+
+	fileName := fmt.Sprintf("xiaomi-mimo-%s-%d.json", uid, time.Now().Unix())
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "xiaomi-mimo",
+		FileName: fileName,
+		Label:    identifier,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"type":       "xiaomi-mimo",
+			"sk":         sk,
+			"uid":        uid,
+			"base_url":   baseURL,
+			"token_type": "Bearer",
+			"expired":    tokenStorage.Expired,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		log.Errorf("Failed to save authentication tokens: %v", errSave)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save tokens"})
+		return
+	}
+
+	CompleteOAuthSession(req.State)
+	CompleteOAuthSessionsByProvider("xiaomi-mimo")
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"message": fmt.Sprintf("Authentication successful! Token saved to %s", savedPath),
+	})
+}
+
 func (h *Handler) RequestXiaomiTokenPlanToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
