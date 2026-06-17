@@ -30,7 +30,7 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: 'https://github.com/kaitranntt/Cli-Proxy-API-Management-Center'
+  panel-github-repository: 'https://github.com/jeffpecky/Cli-Proxy-API-Management-Center'
 
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
@@ -72,6 +72,22 @@ plugins:
 
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+
+# Headroom compression settings
+# Compresses messages before sending to LLM providers to reduce token costs by 40-90%.
+# Requires: pip install headroom-ai[proxy,ml,code]
+# Documentation: https://headroom-docs.vercel.app
+headroom:
+  enabled: false
+  python_path: "python3"           # Path to python3 binary (use "python" on Windows)
+  script_dir: "python"             # Path to directory containing compress.py
+  model: "gpt-4o"                  # Model name for token counting and context limits
+  target_ratio: 0.4                # Keep 40% of tokens (0.0-1.0, null = model decides)
+  compress_user_messages: false    # Compress user messages too (default: false for coding agents)
+  protect_recent: 4               # Don't compress last N messages (active conversation)
+  min_tokens_to_compress: 250      # Minimum tokens for a message to be compressed
+  kompress_model: ""               # Kompress model ID or "disabled" to skip ML compression
+  timeout_seconds: 30              # Subprocess timeout in seconds
 
 # Open OAuth URLs in incognito/private browser mode.
 # Useful when you want to login with a different account without logging out from your current session.
