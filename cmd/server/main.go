@@ -79,30 +79,36 @@ func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiM
 }
 
 type commandModeOptions struct {
-	vertexImport       string
-	pluginCommandLine  bool
-	login              bool
-	antigravityLogin   bool
-	githubCopilotLogin bool
-	codeBuddyLogin     bool
-	codexLogin         bool
-	codexDeviceLogin   bool
-	claudeLogin        bool
-	kiloLogin          bool
-	iflowLogin         bool
-	iflowCookie        bool
-	gitlabLogin        bool
-	gitlabTokenLogin   bool
-	kimiLogin          bool
-	cursorLogin        bool
-	kiroLogin          bool
-	kiroGoogleLogin    bool
-	kiroAWSLogin       bool
-	kiroAWSAuthCode    bool
-	kiroImport         bool
-	kiroIDCLogin       bool
-	xaiLogin           bool
-	qoderLogin         bool
+	vertexImport         string
+	pluginCommandLine    bool
+	login                bool
+	antigravityLogin     bool
+	githubCopilotLogin   bool
+	codeBuddyLogin       bool
+	codexLogin           bool
+	codexDeviceLogin     bool
+	claudeLogin          bool
+	kiloLogin            bool
+	iflowLogin           bool
+	iflowCookie          bool
+	gitlabLogin          bool
+	gitlabTokenLogin     bool
+	kimiLogin            bool
+	cursorLogin          bool
+	kiroLogin            bool
+	kiroGoogleLogin      bool
+	kiroAWSLogin         bool
+	kiroAWSAuthCode      bool
+	kiroImport           bool
+	kiroIDCLogin         bool
+	xaiLogin             bool
+	qoderLogin           bool
+	xiaomiMimoLogin      bool
+	xiaomiTokenPlanLogin bool
+	mimoFreeLogin        bool
+	qwenLogin            bool
+	openaiProviderLogin  bool
+	clineLogin           bool
 }
 
 func isOneShotCommandMode(opts commandModeOptions) bool {
@@ -129,7 +135,13 @@ func isOneShotCommandMode(opts commandModeOptions) bool {
 		opts.kiroImport ||
 		opts.kiroIDCLogin ||
 		opts.xaiLogin ||
-		opts.qoderLogin
+		opts.qoderLogin ||
+		opts.xiaomiMimoLogin ||
+		opts.xiaomiTokenPlanLogin ||
+		opts.mimoFreeLogin ||
+		opts.qwenLogin ||
+		opts.openaiProviderLogin ||
+		opts.clineLogin
 }
 
 // main is the entry point of the application.
@@ -166,6 +178,12 @@ func main() {
 	var codeBuddyLogin bool
 	var xaiLogin bool
 	var qoderLogin bool
+	var xiaomiMimoLogin bool
+	var xiaomiTokenPlanLogin bool
+	var mimoFreeLogin bool
+	var qwenLogin bool
+	var openaiProviderLogin bool
+	var clineLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -209,6 +227,12 @@ func main() {
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using OAuth device flow")
+	flag.BoolVar(&xiaomiMimoLogin, "xiaomi-mimo-login", false, "Login to Xiaomi MiMo using ECDH OAuth")
+	flag.BoolVar(&xiaomiTokenPlanLogin, "xiaomi-tokenplan-login", false, "Login to Xiaomi TokenPlan using API key")
+	flag.BoolVar(&mimoFreeLogin, "mimo-free-login", false, "Login to MiMo Free using auto-bootstrap")
+	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using device flow")
+	flag.BoolVar(&openaiProviderLogin, "openai-login", false, "Login to OpenAI using OAuth")
+	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -641,30 +665,36 @@ func main() {
 	}
 
 	commandMode := isOneShotCommandMode(commandModeOptions{
-		vertexImport:       vertexImport,
-		pluginCommandLine:  pluginHost.HasTriggeredCommandLineFlags(),
-		login:              login,
-		antigravityLogin:   antigravityLogin,
-		githubCopilotLogin: githubCopilotLogin,
-		codeBuddyLogin:     codeBuddyLogin,
-		codexLogin:         codexLogin,
-		codexDeviceLogin:   codexDeviceLogin,
-		claudeLogin:        claudeLogin,
-		kiloLogin:          kiloLogin,
-		iflowLogin:         iflowLogin,
-		iflowCookie:        iflowCookie,
-		gitlabLogin:        gitlabLogin,
-		gitlabTokenLogin:   gitlabTokenLogin,
-		kimiLogin:          kimiLogin,
-		cursorLogin:        cursorLogin,
-		kiroLogin:          kiroLogin,
-		kiroGoogleLogin:    kiroGoogleLogin,
-		kiroAWSLogin:       kiroAWSLogin,
-		kiroAWSAuthCode:    kiroAWSAuthCode,
-		kiroImport:         kiroImport,
-		kiroIDCLogin:       kiroIDCLogin,
-		xaiLogin:           xaiLogin,
-		qoderLogin:         qoderLogin,
+		vertexImport:         vertexImport,
+		pluginCommandLine:    pluginHost.HasTriggeredCommandLineFlags(),
+		login:                login,
+		antigravityLogin:     antigravityLogin,
+		githubCopilotLogin:   githubCopilotLogin,
+		codeBuddyLogin:       codeBuddyLogin,
+		codexLogin:           codexLogin,
+		codexDeviceLogin:     codexDeviceLogin,
+		claudeLogin:          claudeLogin,
+		kiloLogin:            kiloLogin,
+		iflowLogin:           iflowLogin,
+		iflowCookie:          iflowCookie,
+		gitlabLogin:          gitlabLogin,
+		gitlabTokenLogin:     gitlabTokenLogin,
+		kimiLogin:            kimiLogin,
+		cursorLogin:          cursorLogin,
+		kiroLogin:            kiroLogin,
+		kiroGoogleLogin:      kiroGoogleLogin,
+		kiroAWSLogin:         kiroAWSLogin,
+		kiroAWSAuthCode:      kiroAWSAuthCode,
+		kiroImport:           kiroImport,
+		kiroIDCLogin:         kiroIDCLogin,
+		xaiLogin:             xaiLogin,
+		qoderLogin:           qoderLogin,
+		xiaomiMimoLogin:      xiaomiMimoLogin,
+		xiaomiTokenPlanLogin: xiaomiTokenPlanLogin,
+		mimoFreeLogin:        mimoFreeLogin,
+		qwenLogin:            qwenLogin,
+		openaiProviderLogin:  openaiProviderLogin,
+		clineLogin:           clineLogin,
 	})
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
@@ -800,6 +830,18 @@ func main() {
 		cmd.DoXAILogin(cfg, options)
 	} else if qoderLogin {
 		cmd.DoQoderLogin(cfg, options)
+	} else if xiaomiMimoLogin {
+		cmd.DoXiaomiMimoLogin(cfg, options)
+	} else if xiaomiTokenPlanLogin {
+		cmd.DoXiaomiTokenPlanLogin(cfg, options)
+	} else if mimoFreeLogin {
+		cmd.DoMimoFreeLogin(cfg, options)
+	} else if qwenLogin {
+		cmd.DoQwenLogin(cfg, options)
+	} else if openaiProviderLogin {
+		cmd.DoOpenAIProviderLogin(cfg, options)
+	} else if clineLogin {
+		cmd.DoClineLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

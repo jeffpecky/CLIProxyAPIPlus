@@ -20,6 +20,14 @@ func init() {
 	registerRefreshLead("codebuddy", func() Authenticator { return NewCodeBuddyAuthenticator() })
 	registerRefreshLead("cursor", func() Authenticator { return NewCursorAuthenticator() })
 	registerRefreshLead("qoder", func() Authenticator { return NewQoderAuthenticator() })
+	registerRefreshLead("iflow", func() Authenticator { return NewIFlowAuthenticator() })
+	registerRefreshLead("kilo", func() Authenticator { return NewKiloAuthenticator() })
+	registerRefreshLead("xiaomi-mimo", func() Authenticator { return NewXiaomiMimoAuthenticator() })
+	registerRefreshLead("xiaomi-tokenplan", func() Authenticator { return NewXiaomiTokenPlanAuthenticator() })
+	registerRefreshLead("mimo-free", func() Authenticator { return NewMimoFreeAuthenticator() })
+	registerRefreshLead("qwen", func() Authenticator { return NewQwenAuthenticator() })
+	registerRefreshLead("openai", func() Authenticator { return NewOpenAIProviderAuthenticator() })
+	registerRefreshLead("cline", func() Authenticator { return NewClineAuthenticator() })
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

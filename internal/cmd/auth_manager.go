@@ -27,6 +27,12 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodeBuddyAuthenticator(),
 		sdkAuth.NewCursorAuthenticator(),
 		sdkAuth.NewQoderAuthenticator(),
+		sdkAuth.NewXiaomiMimoAuthenticator(),
+		sdkAuth.NewXiaomiTokenPlanAuthenticator(),
+		sdkAuth.NewMimoFreeAuthenticator(),
+		sdkAuth.NewQwenAuthenticator(),
+		sdkAuth.NewOpenAIProviderAuthenticator(),
+		sdkAuth.NewClineAuthenticator(),
 	)
 	return manager
 }
