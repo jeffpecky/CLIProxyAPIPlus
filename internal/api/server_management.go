@@ -209,6 +209,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
+
+		mgmt.GET("/headroom/status", s.mgmt.HeadroomStatus)
+		mgmt.POST("/headroom/install", s.mgmt.HeadroomInstall)
+		mgmt.POST("/headroom/start", s.mgmt.HeadroomStart)
+		mgmt.POST("/headroom/stop", s.mgmt.HeadroomStop)
+		mgmt.POST("/headroom/restart", s.mgmt.HeadroomRestart)
 	}
 }
 
