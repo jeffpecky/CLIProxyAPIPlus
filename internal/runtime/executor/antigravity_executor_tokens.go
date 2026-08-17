@@ -111,12 +111,16 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			attrs = auth.Attributes
 		}
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+		wirePayload, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+		if errHook != nil {
+			return cliproxyexecutor.Response{}, errHook
+		}
 
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       requestURL.String(),
 			Method:    http.MethodPost,
 			Headers:   httpReq.Header.Clone(),
-			Body:      payload,
+			Body:      wirePayload,
 			Provider:  e.Identifier(),
 			AuthID:    authID,
 			AuthLabel: authLabel,

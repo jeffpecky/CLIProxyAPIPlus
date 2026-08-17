@@ -122,6 +122,10 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -235,6 +239,10 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -313,6 +321,10 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	body, err := applyFinalHookBytes(ctx, body, baseModel, to, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	enc, err := helps.TokenizerForModel(baseModel)
 	if err != nil {

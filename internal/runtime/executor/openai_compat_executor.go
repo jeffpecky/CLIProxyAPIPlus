@@ -158,6 +158,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, false, req.Metadata, opts); err != nil {
+		return resp, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return resp, fmt.Errorf("read final OpenAI-compatible request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -168,7 +176,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -369,6 +377,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, true, req.Metadata, opts); err != nil {
+		return nil, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return nil, fmt.Errorf("read final OpenAI-compatible request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -379,7 +395,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -625,6 +641,18 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	translated, err := helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
+	}
+	countReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://token-count.local", bytes.NewReader(translated))
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	countReq.Header.Set("Content-Type", "application/json")
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, countReq, baseModel, to, false, req.Metadata, opts); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	translated, err = io.ReadAll(countReq.Body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("read final OpenAI count request: %w", err)
 	}
 
 	enc, err := helps.TokenizerForModel(modelForCounting)

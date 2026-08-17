@@ -117,6 +117,10 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	translated, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -217,6 +221,10 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	translated, err = applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

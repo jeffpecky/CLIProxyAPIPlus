@@ -174,6 +174,10 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if hasVision {
 		httpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
+	body, err = applyFinalHookBody(ctx, httpReq, req.Model, to, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -317,6 +321,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if hasVision {
 		httpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
+	body, err = applyFinalHookBody(ctx, httpReq, req.Model, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -446,6 +454,10 @@ func (e *GitHubCopilotExecutor) CountTokens(ctx context.Context, auth *cliproxya
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated, err := applyFinalHookBytes(ctx, translated, baseModel, to, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	enc, err := helps.TokenizerForModel(baseModel)
 	if err != nil {

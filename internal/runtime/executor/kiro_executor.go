@@ -234,6 +234,8 @@ func logRetryAttempt(attempt, maxRetries int, reason string, delay time.Duration
 var (
 	kiroHTTPClientPool     *http.Client
 	kiroHTTPClientPoolOnce sync.Once
+	kiroSleep              = time.Sleep
+	kiroHumanDelay         = kiroauth.ApplyHumanLikeDelay
 )
 
 // getKiroPooledHTTPClient returns a shared HTTP client with optimized connection pooling.
@@ -718,7 +720,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Apply human-like delay before first request (not on retries)
 			// This mimics natural user behavior patterns
 			if attempt == 0 && endpointIdx == 0 {
-				kiroauth.ApplyHumanLikeDelay()
+				kiroHumanDelay()
 			}
 
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
@@ -750,6 +752,14 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				attrs = auth.Attributes
 			}
 			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, kiroModelID, to, false, req.Metadata, opts); err != nil {
+				return resp, err
+			}
+			wirePayload, errReadWire := io.ReadAll(httpReq.Body)
+			if errReadWire != nil {
+				return resp, fmt.Errorf("read final Kiro request: %w", errReadWire)
+			}
+			httpReq.Body = io.NopCloser(bytes.NewReader(wirePayload))
 
 			var authID, authLabel, authType, authValue string
 			if auth != nil {
@@ -761,7 +771,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				URL:       url,
 				Method:    http.MethodPost,
 				Headers:   httpReq.Header.Clone(),
-				Body:      kiroPayload,
+				Body:      wirePayload,
 				Provider:  e.Identifier(),
 				AuthID:    authID,
 				AuthLabel: authLabel,
@@ -793,7 +803,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				if isRetryableError(err) && attempt < retryCfg.MaxRetries {
 					delay := calculateRetryDelay(attempt, retryCfg)
 					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("socket error: %v", err), delay, endpointConfig.Name)
-					time.Sleep(delay)
+					kiroSleep(delay)
 					continue
 				}
 
@@ -836,7 +846,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				if isRetryableHTTPStatus(httpResp.StatusCode) && attempt < retryCfg.MaxRetries {
 					delay := calculateRetryDelay(attempt, retryCfg)
 					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("HTTP %d", httpResp.StatusCode), delay, endpointConfig.Name)
-					time.Sleep(delay)
+					kiroSleep(delay)
 					continue
 				} else if attempt < maxRetries {
 					// Fallback for other 5xx errors (500, 501, etc.)
@@ -845,7 +855,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 						backoff = 30 * time.Second
 					}
 					log.Warnf("kiro: server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
-					time.Sleep(backoff)
+					kiroSleep(backoff)
 					continue
 				}
 				log.Errorf("kiro: server error %d after %d retries", httpResp.StatusCode, maxRetries)
@@ -1161,7 +1171,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			// This mimics natural user behavior patterns
 			// Note: Delay is NOT applied during streaming response - only before initial request
 			if attempt == 0 && endpointIdx == 0 {
-				kiroauth.ApplyHumanLikeDelay()
+				kiroHumanDelay()
 			}
 
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
@@ -1193,6 +1203,14 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				attrs = auth.Attributes
 			}
 			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, kiroModelID, sdktranslator.FromString("kiro"), true, req.Metadata, opts); err != nil {
+				return nil, err
+			}
+			wirePayload, errReadWire := io.ReadAll(httpReq.Body)
+			if errReadWire != nil {
+				return nil, fmt.Errorf("read final Kiro request: %w", errReadWire)
+			}
+			httpReq.Body = io.NopCloser(bytes.NewReader(wirePayload))
 
 			var authID, authLabel, authType, authValue string
 			if auth != nil {
@@ -1204,7 +1222,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				URL:       url,
 				Method:    http.MethodPost,
 				Headers:   httpReq.Header.Clone(),
-				Body:      kiroPayload,
+				Body:      wirePayload,
 				Provider:  e.Identifier(),
 				AuthID:    authID,
 				AuthLabel: authLabel,
@@ -1222,7 +1240,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				if isRetryableError(err) && attempt < retryCfg.MaxRetries {
 					delay := calculateRetryDelay(attempt, retryCfg)
 					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("stream socket error: %v", err), delay, endpointConfig.Name)
-					time.Sleep(delay)
+					kiroSleep(delay)
 					continue
 				}
 
@@ -1265,7 +1283,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				if isRetryableHTTPStatus(httpResp.StatusCode) && attempt < retryCfg.MaxRetries {
 					delay := calculateRetryDelay(attempt, retryCfg)
 					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("stream HTTP %d", httpResp.StatusCode), delay, endpointConfig.Name)
-					time.Sleep(delay)
+					kiroSleep(delay)
 					continue
 				} else if attempt < maxRetries {
 					// Fallback for other 5xx errors (500, 501, etc.)
@@ -1274,7 +1292,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 						backoff = 30 * time.Second
 					}
 					log.Warnf("kiro: stream server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
-					time.Sleep(backoff)
+					kiroSleep(backoff)
 					continue
 				}
 				log.Errorf("kiro: stream server error %d after %d retries", httpResp.StatusCode, maxRetries)
@@ -3551,13 +3569,18 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 // CountTokens counts tokens locally using tiktoken since Kiro API doesn't expose a token counting endpoint.
 // This provides approximate token counts for client requests.
 func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	body := sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FromString("kiro"), req.Model, bytes.Clone(req.Payload), false)
+	body, err := applyFinalHookBytes(ctx, body, e.mapModelToKiro(req.Model), sdktranslator.FromString("kiro"), req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	// Use tiktoken for local token counting
 	enc, err := getTokenizer(req.Model)
 	if err != nil {
 		log.Warnf("kiro: CountTokens failed to get tokenizer: %v, falling back to estimate", err)
 		// Fallback: estimate from payload size (roughly 4 chars per token)
-		estimatedTokens := len(req.Payload) / 4
-		if estimatedTokens == 0 && len(req.Payload) > 0 {
+		estimatedTokens := len(body) / 4
+		if estimatedTokens == 0 && len(body) > 0 {
 			estimatedTokens = 1
 		}
 		return cliproxyexecutor.Response{
@@ -3569,18 +3592,18 @@ func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 	var totalTokens int64
 
 	// Try OpenAI chat format first
-	if tokens, countErr := countOpenAIChatTokens(enc, req.Payload); countErr == nil && tokens > 0 {
+	if tokens, countErr := countOpenAIChatTokens(enc, body); countErr == nil && tokens > 0 {
 		totalTokens = tokens
 		log.Debugf("kiro: CountTokens counted %d tokens using OpenAI chat format", totalTokens)
 	} else {
 		// Fallback: count raw payload tokens
-		if tokenCount, countErr := enc.Count(string(req.Payload)); countErr == nil {
+		if tokenCount, countErr := enc.Count(string(body)); countErr == nil {
 			totalTokens = int64(tokenCount)
 			log.Debugf("kiro: CountTokens counted %d tokens from raw payload", totalTokens)
 		} else {
 			// Final fallback: estimate from payload size
-			totalTokens = int64(len(req.Payload) / 4)
-			if totalTokens == 0 && len(req.Payload) > 0 {
+			totalTokens = int64(len(body) / 4)
+			if totalTokens == 0 && len(body) > 0 {
 				totalTokens = 1
 			}
 			log.Debugf("kiro: CountTokens estimated %d tokens from payload size", totalTokens)

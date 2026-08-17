@@ -203,6 +203,10 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
+		payload, err = applyFinalHookBody(ctx, reqHTTP, attemptModel, to, false, req, opts)
+		if err != nil {
+			return resp, err
+		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -354,6 +358,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "text/event-stream")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
+		payload, err = applyFinalHookBody(ctx, reqHTTP, attemptModel, to, true, req, opts)
+		if err != nil {
+			return nil, err
+		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -562,6 +570,10 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		applyGeminiCLIHeaders(reqHTTP, baseModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
+		payload, err = applyFinalHookBody(ctx, reqHTTP, baseModel, to, false, req, opts)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -86,6 +87,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if errHook := cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, true, req.Metadata, opts); errHook != nil {
+		return nil, errHook
+	}
+	upstreamBody, err = io.ReadAll(httpReq.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read final Codex request: %w", err)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(upstreamBody))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

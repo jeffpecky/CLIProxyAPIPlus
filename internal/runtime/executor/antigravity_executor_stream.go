@@ -113,6 +113,13 @@ attemptLoop:
 				err = errReq
 				return nil, err
 			}
+			hookBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+			if errHook != nil {
+				return nil, errHook
+			}
+			hookBody = applyAntigravityNativeSignatureReplayIfNeeded(baseModel, hookBody)
+			httpReq.Body = io.NopCloser(bytes.NewReader(hookBody))
+			httpReq.ContentLength = int64(len(hookBody))
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errDo)

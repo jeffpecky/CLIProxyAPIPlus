@@ -46,6 +46,9 @@ func (e *QoderExecutor) Identifier() string {
 
 // ExecuteStream executes a streaming request against Qoder API
 func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if err = finalProviderHookUnsupported(opts, "qoder"); err != nil {
+		return nil, err
+	}
 	// Get token storage from auth record
 	storage, ok := authRecord.Storage.(*qoderauth.QoderTokenStorage)
 	if !ok {
@@ -534,6 +537,9 @@ func (e *qoderStatusError) StatusCode() int {
 
 // CountTokens estimates token count for the request (placeholder implementation)
 func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if err := finalProviderHookUnsupported(opts, "qoder"); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	// Translate non-openai formats before extracting messages
 	payload := req.Payload
 	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
@@ -576,6 +582,9 @@ func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 // Execute executes a non-streaming request against Qoder API
 func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if err := finalProviderHookUnsupported(opts, "qoder"); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	// We need ExecuteStream to:
 	//   1. Translate the request payload from the client's SourceFormat
 	//      (Anthropic/Gemini/etc) into OpenAI before sending to Qoder.

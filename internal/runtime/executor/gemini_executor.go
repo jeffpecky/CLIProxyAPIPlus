@@ -184,6 +184,14 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, false, req.Metadata, opts); err != nil {
+		return resp, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return resp, fmt.Errorf("read final Gemini request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -194,7 +202,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -293,6 +301,14 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, true, req.Metadata, opts); err != nil {
+		return nil, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return nil, fmt.Errorf("read final Gemini request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -303,7 +319,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -414,13 +430,21 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	applyGeminiHeaders(httpReq, auth)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, targetName, sdktranslator.FormatInteractions, false, req.Metadata, opts); err != nil {
+		return resp, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return resp, fmt.Errorf("read final Gemini Interactions request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -490,13 +514,21 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	applyGeminiHeaders(httpReq, auth)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, targetName, sdktranslator.FormatInteractions, true, req.Metadata, opts); err != nil {
+		return nil, err
+	}
+	wireBody, errReadWire := io.ReadAll(httpReq.Body)
+	if errReadWire != nil {
+		return nil, fmt.Errorf("read final Gemini Interactions request: %w", errReadWire)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      wireBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -647,6 +679,14 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, false, req.Metadata, opts); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	translatedReq, err = io.ReadAll(httpReq.Body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("read final Gemini count request: %w", err)
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(translatedReq))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

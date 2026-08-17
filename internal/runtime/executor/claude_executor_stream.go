@@ -146,6 +146,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, fmt.Errorf("apply Claude credential metadata: %w", err)
 		}
 	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	if err != nil {
+		return nil, err
+	}
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
+		return nil, errHeaders
+	}
+	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, upstreamModel, to, true, req.Metadata, opts); err != nil {
+		return nil, err
+	}
+	bodyForUpstream, err = io.ReadAll(httpReq.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read final Claude request: %w", err)
+	}
 	cchBilling := ""
 	if cchSigning {
 		cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
@@ -155,13 +169,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return nil, err
-	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
-		return nil, errHeaders
-	}
+	resetFinalRequestBody(httpReq, bodyForUpstream)
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{

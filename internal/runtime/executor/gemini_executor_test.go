@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestCapGeminiMaxOutputTokensUsesOutputTokenLimit(t *testing.T) {
@@ -190,6 +192,49 @@ func TestGeminiExecutorNativeInteractionsUsesInteractionsEndpoint(t *testing.T) 
 	}
 	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "interaction_1" {
 		t.Fatalf("response id = %q, want interaction_1", got)
+	}
+}
+
+func TestGeminiInteractionsFinalHookMutatesWireBody(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var wire []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				wire, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", map[bool]string{false: "application/json", true: "text/event-stream"}[stream])
+				if stream {
+					_, _ = w.Write([]byte("data: {\"id\":\"i\",\"status\":\"completed\"}\n\n"))
+				} else {
+					_, _ = w.Write([]byte(`{"id":"i","status":"completed"}`))
+				}
+			}))
+			t.Cleanup(server.Close)
+			exec := NewGeminiInteractionsExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "key", "base_url": server.URL}}
+			original := []byte(`{"agent":"agents/a","input":"hi"}`)
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, OriginalRequest: bytes.Clone(original), Stream: stream,
+				FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+					if in.Format != sdktranslator.FormatInteractions || in.Model != "agents/a" || in.Stream != stream {
+						t.Fatalf("hook input = %+v", in)
+					}
+					body, _ := sjson.SetBytes(in.Body, "hooked", true)
+					return cliproxyexecutor.FinalProviderRequestResult{Body: body}, nil
+				}}
+			req := cliproxyexecutor.Request{Model: "agents/a", Payload: bytes.Clone(original)}
+			if stream {
+				result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for range result.Chunks {
+				}
+			} else if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+				t.Fatal(err)
+			}
+			if !gjson.GetBytes(wire, "hooked").Bool() || !bytes.Equal(opts.OriginalRequest, original) || !bytes.Equal(req.Payload, original) {
+				t.Fatalf("wire/source mismatch: wire=%s original=%s payload=%s", wire, opts.OriginalRequest, req.Payload)
+			}
+		})
 	}
 }
 

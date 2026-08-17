@@ -350,6 +350,9 @@ func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count locally using tiktoken.
 func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return resp, err
+	}
 	defer func() {
 		if err != nil {
 			log.Warnf("cursor CountTokens error: %v", err)
@@ -402,6 +405,9 @@ func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 
 // Execute handles non-streaming requests.
 func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return resp, err
+	}
 	log.Debugf("cursor Execute: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -538,6 +544,9 @@ func isOpenAICompatibleSourceFormat(format sdktranslator.Format) bool {
 // a parked MCP/H2 session; OpenAI-compatible tool results use a fresh request
 // rebuilt from the complete client transcript.
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return nil, err
+	}
 	log.Debugf("cursor ExecuteStream: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
 		if r := recover(); r != nil {

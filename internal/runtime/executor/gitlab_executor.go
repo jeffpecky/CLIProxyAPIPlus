@@ -88,6 +88,9 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.Execute(ctx, nativeAuth, nativeReq, opts)
 	}
+	if err = finalProviderHookUnsupported(opts, "gitlab duo"); err != nil {
+		return resp, err
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -130,6 +133,9 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.ExecuteStream(ctx, nativeAuth, nativeReq, opts)
+	}
+	if err = finalProviderHookUnsupported(opts, "gitlab duo"); err != nil {
+		return nil, err
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -234,6 +240,9 @@ func (e *GitLabExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 func (e *GitLabExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.CountTokens(ctx, nativeAuth, nativeReq, opts)
+	}
+	if err := finalProviderHookUnsupported(opts, "gitlab duo"); err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	translated := sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FromString("openai"), baseModel, req.Payload, false)

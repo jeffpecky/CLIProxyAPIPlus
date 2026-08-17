@@ -117,6 +117,13 @@ attemptLoop:
 				err = errReq
 				return resp, err
 			}
+			hookBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+			if errHook != nil {
+				return resp, errHook
+			}
+			hookBody = applyAntigravityNativeSignatureReplayIfNeeded(baseModel, hookBody)
+			httpReq.Body = io.NopCloser(bytes.NewReader(hookBody))
+			httpReq.ContentLength = int64(len(hookBody))
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
@@ -341,6 +348,13 @@ attemptLoop:
 				err = errReq
 				return resp, err
 			}
+			hookBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+			if errHook != nil {
+				return resp, errHook
+			}
+			hookBody = applyAntigravityNativeSignatureReplayIfNeeded(baseModel, hookBody)
+			httpReq.Body = io.NopCloser(bytes.NewReader(hookBody))
+			httpReq.ContentLength = int64(len(hookBody))
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {

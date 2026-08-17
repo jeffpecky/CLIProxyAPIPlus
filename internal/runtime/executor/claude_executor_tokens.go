@@ -47,6 +47,18 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
+	countReq, errCountReq := http.NewRequestWithContext(ctx, http.MethodPost, "http://token-count.local", bytes.NewReader(body))
+	if errCountReq != nil {
+		return cliproxyexecutor.Response{}, errCountReq
+	}
+	countReq.Header.Set("Content-Type", "application/json")
+	if errHook := cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, countReq, e.upstreamModel(baseModel), to, false, req.Metadata, opts); errHook != nil {
+		return cliproxyexecutor.Response{}, errHook
+	}
+	body, errThinking = io.ReadAll(countReq.Body)
+	if errThinking != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("read final Claude count request: %w", errThinking)
+	}
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
@@ -222,6 +234,14 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, body, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
+	if errHook := cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, upstreamModel, to, false, req.Metadata, opts); errHook != nil {
+		return cliproxyexecutor.Response{}, errHook
+	}
+	body, err = io.ReadAll(httpReq.Body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("read final Claude count request: %w", err)
+	}
+	resetFinalRequestBody(httpReq, body)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

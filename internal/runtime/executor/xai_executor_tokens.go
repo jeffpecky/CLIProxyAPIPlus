@@ -18,6 +18,10 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	prepared.body, err = applyFinalHookBytes(ctx, prepared.body, prepared.baseModel, prepared.to, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	enc, err := tokenizer.Get(tokenizer.O200kBase)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai executor: tokenizer init failed: %w", err)

@@ -4146,6 +4146,106 @@ func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
 	}
 }
 
+func TestClaudeFinalHookUsesMappedModelAndRecomputesCCH(t *testing.T) {
+	var wire []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	exec := NewClaudeExecutor(&config.Config{})
+	exec.upstreamModelNormalizer = func(string) string { return "mapped-upstream" }
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-oat-hook", "base_url": server.URL, "cloak_mode": "never"}, Metadata: claudeOAuthTestMetadata()}
+	original := []byte(`{"model":"alias","messages":[{"role":"user","content":"long"}],"max_tokens":64}`)
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "alias", Payload: bytes.Clone(original)}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: bytes.Clone(original),
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			if in.Model != "mapped-upstream" || gjson.GetBytes(in.Body, "model").String() != "mapped-upstream" {
+				t.Fatalf("hook model/body = %q %s", in.Model, in.Body)
+			}
+			body, _ := sjson.SetBytes(in.Body, "messages.0.content", "short")
+			return cliproxyexecutor.FinalProviderRequestResult{Body: body}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gjson.GetBytes(wire, "messages.0.content").String() != "short" {
+		t.Fatalf("wire not transformed: %s", wire)
+	}
+	resigned, err := finalizeAnthropicMessagesBodyCCH(wire, "")
+	if err != nil || !bytes.Equal(resigned, wire) {
+		t.Fatalf("wire CCH stale: err=%v wire=%s resigned=%s", err, wire, resigned)
+	}
+}
+
+func TestClaudeFinalHookAppliesHeaderMergeAndClearAfterProviderHeaders(t *testing.T) {
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	exec := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key", "base_url": server.URL}}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-3-5-sonnet", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":8}`)}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			if in.Headers.Get("Anthropic-Version") == "" {
+				t.Fatal("hook did not see provider headers")
+			}
+			return cliproxyexecutor.FinalProviderRequestResult{Headers: http.Header{"X-Hook": []string{"yes"}}, ClearHeaders: []string{"Anthropic-Version"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headers.Get("X-Hook") != "yes" || headers.Get("Anthropic-Version") != "" {
+		t.Fatalf("wire headers=%v", headers)
+	}
+}
+
+func TestClaudeStreamFinalHookUsesMappedModelAndRecomputesCCH(t *testing.T) {
+	var wire []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+	exec := NewClaudeExecutor(&config.Config{})
+	exec.upstreamModelNormalizer = func(string) string { return "mapped-stream" }
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-oat-stream-hook", "base_url": server.URL, "cloak_mode": "never"}, Metadata: claudeOAuthTestMetadata()}
+	original := []byte(`{"model":"alias","messages":[{"role":"user","content":"long"}],"max_tokens":64,"stream":true}`)
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "alias", Payload: bytes.Clone(original)}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: bytes.Clone(original), Stream: true,
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			if in.Model != "mapped-stream" || !in.Stream || gjson.GetBytes(in.Body, "model").String() != "mapped-stream" {
+				t.Fatalf("hook input: model=%q stream=%t body=%s", in.Model, in.Stream, in.Body)
+			}
+			body, _ := sjson.SetBytes(in.Body, "messages.0.content", "short-stream")
+			return cliproxyexecutor.FinalProviderRequestResult{Body: body}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+	}
+	if gjson.GetBytes(wire, "messages.0.content").String() != "short-stream" {
+		t.Fatalf("wire not transformed: %s", wire)
+	}
+	resigned, err := finalizeAnthropicMessagesBodyCCH(wire, "")
+	if err != nil || !bytes.Equal(resigned, wire) {
+		t.Fatalf("wire CCH stale: err=%v wire=%s resigned=%s", err, wire, resigned)
+	}
+}
+
 func TestClaudeExecutor_CustomBaseURLAPIKeyDoesNotEnableCCHSigning(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

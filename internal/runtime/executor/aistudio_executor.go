@@ -149,6 +149,16 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	hookReq, errHookReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wsReq.Body))
+	if errHookReq != nil {
+		return resp, errHookReq
+	}
+	hookReq.Header = wsReq.Headers
+	wsReq.Body, err = applyFinalHookBody(ctx, hookReq, baseModel, body.toFormat, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
+	wsReq.Headers = hookReq.Header
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -218,6 +228,16 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	hookReq, errHookReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wsReq.Body))
+	if errHookReq != nil {
+		return nil, errHookReq
+	}
+	hookReq.Header = wsReq.Headers
+	wsReq.Body, err = applyFinalHookBody(ctx, hookReq, baseModel, body.toFormat, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	wsReq.Headers = hookReq.Header
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -397,6 +417,16 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
 	}
+	hookReq, errHookReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wsReq.Body))
+	if errHookReq != nil {
+		return cliproxyexecutor.Response{}, errHookReq
+	}
+	hookReq.Header = wsReq.Headers
+	wsReq.Body, err = applyFinalHookBody(ctx, hookReq, baseModel, body.toFormat, false, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	wsReq.Headers = hookReq.Header
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

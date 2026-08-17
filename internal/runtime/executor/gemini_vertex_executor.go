@@ -375,6 +375,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, sdktranslator.FormatGemini, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -500,6 +504,10 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -614,6 +622,10 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -760,6 +772,10 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	body, err = applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -887,6 +903,10 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	translatedReq, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -978,6 +998,10 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	translatedReq, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

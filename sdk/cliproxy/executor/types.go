@@ -65,6 +65,26 @@ type Request struct {
 // RequestAfterAuthInterceptor rewrites a request after credential selection and before executor translation.
 type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
 
+// FinalProviderRequestHook rewrites only the provider-native wire request.
+type FinalProviderRequestHook func(context.Context, FinalProviderRequest) (FinalProviderRequestResult, error)
+
+// FinalProviderRequest is an immutable snapshot of the final upstream request.
+type FinalProviderRequest struct {
+	Model    string
+	Format   sdktranslator.Format
+	Stream   bool
+	Headers  http.Header
+	Body     []byte
+	Metadata map[string]any
+}
+
+// FinalProviderRequestResult contains wire-only replacements.
+type FinalProviderRequestResult struct {
+	Body         []byte
+	Headers      http.Header
+	ClearHeaders []string
+}
+
 // RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
 type RequestAfterAuthInterceptRequest struct {
 	// SourceFormat is the original client protocol format.
@@ -159,6 +179,8 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// FinalProviderRequestHook runs after provider translation and before wire send.
+	FinalProviderRequestHook FinalProviderRequestHook
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
 }

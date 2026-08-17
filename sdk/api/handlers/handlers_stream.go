@@ -275,6 +275,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		FinalProviderRequestHook:    h.tokenSaverFinalHook(modelExecutionHeaders(ctx, execOptions.Headers)),
 	}
 	opts.Metadata = reqMeta
 	var interceptErr *interfaces.ErrorMessage

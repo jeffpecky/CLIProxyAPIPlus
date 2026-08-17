@@ -255,6 +255,35 @@ type RemoteManagement struct {
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
+// TokenSaverConfig configures optional request-body token saving transforms.
+type TokenSaverConfig struct {
+	Enabled  bool                     `yaml:"enabled" json:"enabled"`
+	RTK      bool                     `yaml:"rtk" json:"rtk"`
+	Caveman  TokenSaverPromptConfig   `yaml:"caveman" json:"caveman"`
+	Ponytail TokenSaverPromptConfig   `yaml:"ponytail" json:"ponytail"`
+	Headroom TokenSaverHeadroomConfig `yaml:"headroom" json:"headroom"`
+	PXPipe   TokenSaverPXPipeConfig   `yaml:"pxpipe" json:"pxpipe"`
+}
+
+type TokenSaverPromptConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Level   string `yaml:"level" json:"level"`
+}
+
+type TokenSaverHeadroomConfig struct {
+	Enabled              bool   `yaml:"enabled" json:"enabled"`
+	URL                  string `yaml:"url" json:"url"`
+	TimeoutMS            int    `yaml:"timeout-ms" json:"timeout-ms"`
+	CompressUserMessages bool   `yaml:"compress-user-messages" json:"compress-user-messages"`
+	ProxyTokenEnv        string `yaml:"proxy-token-env" json:"proxy-token-env"`
+}
+
+type TokenSaverPXPipeConfig struct {
+	Enabled   bool `yaml:"enabled" json:"enabled"`
+	MinChars  int  `yaml:"min-chars" json:"min-chars"`
+	TimeoutMS int  `yaml:"timeout-ms" json:"timeout-ms"`
+}
+
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
 // It provides configuration options for automatic failover mechanisms.
 type QuotaExceeded struct {

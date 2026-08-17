@@ -123,6 +123,10 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	e.applyHeaders(httpReq, accessToken, userID, domain)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
+	translated, err = applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -220,6 +224,10 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	e.applyHeaders(httpReq, accessToken, userID, domain)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
+	translated, err = applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

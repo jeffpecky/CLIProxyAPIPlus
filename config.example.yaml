@@ -44,6 +44,29 @@ api-keys:
 # Enable debug logging
 debug: false
 
+# Optional request-body token savers. Disabled unless explicitly enabled.
+# Per-request opt-out header: X-CLIProxy-Token-Saver: off
+# token-saver:
+#   enabled: false
+#   rtk: true
+#   caveman:
+#     enabled: false
+#     level: terse
+#   ponytail:
+#     enabled: false
+#     level: standard
+#   headroom:
+#     enabled: false
+#     url: "http://127.0.0.1:20129"
+#     timeout-ms: 3000
+#     compress-user-messages: false
+#     proxy-token-env: "HEADROOM_PROXY_TOKEN"
+#   pxpipe:
+#     # Runtime paused. Keep disabled.
+#     enabled: false
+#     min-chars: 25000
+#     timeout-ms: 15000
+
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false

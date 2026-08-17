@@ -64,6 +64,9 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// TokenSaver configures optional request-body token saving transforms.
+	TokenSaver TokenSaverConfig `yaml:"token-saver" json:"token-saver"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

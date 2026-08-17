@@ -36,6 +36,10 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = helps.SetBoolIfDifferent(body, "stream", false)
 	body = normalizeCodexInstructions(body)
+	body, err = applyFinalHookBytes(ctx, body, baseModel, to, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {

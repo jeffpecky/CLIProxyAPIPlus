@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type handlerInterceptorTestHost struct {
@@ -144,13 +146,14 @@ func (e *interceptorCaptureExecutor) capture(req coreexecutor.Request, opts core
 		Metadata: req.Metadata,
 	}
 	e.lastOptions = coreexecutor.Options{
-		Stream:          opts.Stream,
-		Alt:             opts.Alt,
-		Headers:         cloneHeader(opts.Headers),
-		Query:           opts.Query,
-		OriginalRequest: cloneBytes(opts.OriginalRequest),
-		SourceFormat:    opts.SourceFormat,
-		Metadata:        opts.Metadata,
+		Stream:                   opts.Stream,
+		Alt:                      opts.Alt,
+		Headers:                  cloneHeader(opts.Headers),
+		Query:                    opts.Query,
+		OriginalRequest:          cloneBytes(opts.OriginalRequest),
+		SourceFormat:             opts.SourceFormat,
+		Metadata:                 opts.Metadata,
+		FinalProviderRequestHook: opts.FinalProviderRequestHook,
 	}
 }
 
@@ -178,6 +181,107 @@ func newInterceptorHandler(t *testing.T, model string, executor *interceptorCapt
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
 	return NewBaseAPIHandlers(cfg, manager)
+}
+
+func TestTokenSaverMutatesExecutionPayload(t *testing.T) {
+	model := "token-saver-model"
+	executor := &interceptorCaptureExecutor{provider: "openai"}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
+		TokenSaver: sdkconfig.TokenSaverConfig{
+			Enabled: true,
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+		},
+	})
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"system","content":"base"}]}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v body=%s", errMsg, body)
+	}
+	req, opts := executor.captured()
+	if bytes.Contains(req.Payload, []byte("Respond like terse caveman")) || opts.FinalProviderRequestHook == nil {
+		t.Fatalf("translator payload mutated or final hook missing: %s", req.Payload)
+	}
+	result, errHook := opts.FinalProviderRequestHook(context.Background(), coreexecutor.FinalProviderRequest{Model: model, Format: sdktranslator.FormatOpenAI, Body: req.Payload})
+	if errHook != nil || !bytes.Contains(result.Body, []byte("Respond like terse caveman")) {
+		t.Fatalf("final hook result missing token saver prompt: err=%v body=%s", errHook, result.Body)
+	}
+	if bytes.Contains(opts.OriginalRequest, []byte("Respond like terse caveman")) {
+		t.Fatalf("original request mutated: %s", opts.OriginalRequest)
+	}
+}
+
+func TestTokenSaverHeaderOptOutLeavesExecutionPayload(t *testing.T) {
+	model := "token-saver-opt-out-model"
+	executor := &interceptorCaptureExecutor{provider: "openai"}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
+		TokenSaver: sdkconfig.TokenSaverConfig{
+			Enabled: true,
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+		},
+	})
+	headers := http.Header{"X-CLIProxy-Token-Saver": []string{"off"}}
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(contextWithHeaders(headers), "openai", model, []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"system","content":"base"}]}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v body=%s", errMsg, body)
+	}
+	req, opts := executor.captured()
+	if opts.FinalProviderRequestHook != nil || bytes.Contains(req.Payload, []byte("Respond like terse caveman")) {
+		t.Fatalf("payload mutated despite opt-out: %s", req.Payload)
+	}
+}
+
+func TestTokenSaverFinalHookOnlyExistsForActiveRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  sdkconfig.TokenSaverConfig
+		headers http.Header
+		wantNil bool
+	}{
+		{"global disabled", sdkconfig.TokenSaverConfig{}, nil, true},
+		{"all transforms disabled", sdkconfig.TokenSaverConfig{Enabled: true}, nil, true},
+		{"opted out", sdkconfig.TokenSaverConfig{Enabled: true, RTK: true}, http.Header{"X-CLIProxy-Token-Saver": []string{"off"}}, true},
+		{"active", sdkconfig.TokenSaverConfig{Enabled: true, RTK: true}, nil, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := &BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{TokenSaver: test.config}}
+			if gotNil := h.tokenSaverFinalHook(test.headers) == nil; gotNil != test.wantNil {
+				t.Fatalf("hook nil=%t, want %t", gotNil, test.wantNil)
+			}
+		})
+	}
+}
+
+func TestTokenSaverMutatesStreamExecutionPayload(t *testing.T) {
+	model := "token-saver-stream-model"
+	executor := &interceptorCaptureExecutor{provider: "openai"}
+	executor.stream = func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {}\n\n")}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
+		TokenSaver: sdkconfig.TokenSaverConfig{
+			Enabled: true,
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q,"stream":true,"messages":[{"role":"system","content":"base"}]}`, model)), "")
+	if dataChan == nil {
+		t.Fatal("ExecuteStreamWithAuthManager() data channel is nil")
+	}
+	for range dataChan {
+	}
+	if errMsg := <-errChan; errMsg != nil {
+		t.Fatalf("ExecuteStreamWithAuthManager() error = %+v", errMsg)
+	}
+	req, opts := executor.captured()
+	if bytes.Contains(req.Payload, []byte("Respond like terse caveman")) || opts.FinalProviderRequestHook == nil {
+		t.Fatalf("stream translator payload mutated or final hook missing: %s", req.Payload)
+	}
 }
 
 func contextWithHeaders(headers http.Header) context.Context {

@@ -1,13 +1,97 @@
 package executor
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+func TestKiroFinalHookMutatesFinalRetryEnvelopeOnly(t *testing.T) {
+	var wire []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, _ = io.ReadAll(r.Body)
+		http.Error(w, "stop", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpointConfigs
+	kiroEndpointConfigs = []kiroEndpointConfig{{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+	t.Cleanup(func() { kiroEndpointConfigs = oldEndpoints })
+
+	body := []byte(`{"conversationState":{"currentMessage":{"userInputMessage":{"content":"long"}}}}`)
+	req := cliproxyexecutor.Request{Model: "alias", Payload: bytes.Clone(body)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("kiro"), OriginalRequest: bytes.Clone(body),
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			if in.Model != "kiro-final" || in.Format.String() != "kiro" || !gjson.GetBytes(in.Body, "conversationState").Exists() {
+				t.Fatalf("hook missed final Kiro envelope: model=%q format=%q body=%s", in.Model, in.Format, in.Body)
+			}
+			out, _ := sjson.SetBytes(in.Body, "hooked", true)
+			return cliproxyexecutor.FinalProviderRequestResult{Body: out}, nil
+		}}
+	exec := NewKiroExecutor(nil)
+	_, err := exec.executeWithRetry(context.Background(), nil, req, opts, "token", "", nil, body, sdktranslator.FromString("kiro"), sdktranslator.FromString("kiro"), newUsageReporter(context.Background(), exec.Identifier(), req.Model, nil), "", "kiro-final", false, true, "test-token")
+	if err == nil {
+		t.Fatal("expected server stop error")
+	}
+	if !gjson.GetBytes(wire, "hooked").Bool() || !bytes.Equal(req.Payload, body) || !bytes.Equal(opts.OriginalRequest, body) {
+		t.Fatalf("wire/source mismatch: wire=%s payload=%s original=%s", wire, req.Payload, opts.OriginalRequest)
+	}
+}
+
+func TestKiroFinalHookRunsForEveryInternalRetry(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if requests < 3 {
+					http.Error(w, "retry", http.StatusServiceUnavailable)
+					return
+				}
+				http.Error(w, "stop", http.StatusBadRequest)
+			}))
+			t.Cleanup(server.Close)
+			oldEndpoints, oldSleep, oldHumanDelay := kiroEndpointConfigs, kiroSleep, kiroHumanDelay
+			kiroEndpointConfigs = []kiroEndpointConfig{{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+			kiroSleep = func(time.Duration) {}
+			kiroHumanDelay = func() {}
+			t.Cleanup(func() { kiroEndpointConfigs, kiroSleep, kiroHumanDelay = oldEndpoints, oldSleep, oldHumanDelay })
+			body := []byte(`{"conversationState":{"currentMessage":{"userInputMessage":{"content":"long"}}}}`)
+			req := cliproxyexecutor.Request{Model: "alias", Payload: bytes.Clone(body)}
+			hookCalls := 0
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("kiro"), OriginalRequest: bytes.Clone(body), Stream: stream,
+				FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+					hookCalls++
+					if in.Stream != stream || !gjson.GetBytes(in.Body, "conversationState").Exists() {
+						t.Fatalf("hook input = %+v", in)
+					}
+					return cliproxyexecutor.FinalProviderRequestResult{}, nil
+				}}
+			exec := NewKiroExecutor(nil)
+			reporter := newUsageReporter(context.Background(), exec.Identifier(), req.Model, nil)
+			if stream {
+				_, _ = exec.executeStreamWithRetry(context.Background(), nil, req, opts, "token", "", nil, body, sdktranslator.FromString("kiro"), reporter, "", "kiro-final", false, true, "test-token")
+			} else {
+				_, _ = exec.executeWithRetry(context.Background(), nil, req, opts, "token", "", nil, body, sdktranslator.FromString("kiro"), sdktranslator.FromString("kiro"), reporter, "", "kiro-final", false, true, "test-token")
+			}
+			if requests != 3 || hookCalls != requests {
+				t.Fatalf("requests=%d hookCalls=%d", requests, hookCalls)
+			}
+		})
+	}
+}
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
 	tests := []struct {
