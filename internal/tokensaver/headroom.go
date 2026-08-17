@@ -46,12 +46,11 @@ func applyHeadroom(root any, opts Options) (any, headroomResult) {
 	sourceMessages := cloneMessages(projection.messages)
 	scope := headroomPrefixScope{
 		Session: opts.Session, Format: opts.Format, Model: opts.Model, Endpoint: endpoint,
-		Config: fmt.Sprintf("mode=lossy_inline|compress_user_messages=%t", opts.Config.Headroom.CompressUserMessages),
+		Config: fmt.Sprintf("compress_user_messages=%t", opts.Config.Headroom.CompressUserMessages),
 	}
 	forwardMessages, frozenCount := defaultHeadroomPrefixCache.reuse(scope, projection.messages)
 	payload := map[string]any{
 		"messages": forwardMessages,
-		"config":   map[string]any{"mode": "lossy_inline"},
 	}
 	if frozenCount > 0 {
 		payload["frozen_message_count"] = frozenCount
@@ -62,7 +61,11 @@ func applyHeadroom(root any, opts Options) (any, headroomResult) {
 		payload["model"] = model
 	}
 	if opts.Config.Headroom.CompressUserMessages {
-		payload["config"].(map[string]any)["compress_user_messages"] = true
+		if cfg, ok := payload["config"].(map[string]any); ok {
+			cfg["compress_user_messages"] = true
+		} else {
+			payload["config"] = map[string]any{"compress_user_messages": true}
+		}
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {

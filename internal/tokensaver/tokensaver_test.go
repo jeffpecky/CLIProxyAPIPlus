@@ -34,9 +34,8 @@ func TestHeadroomUsesNativeClaudeContract(t *testing.T) {
 		if content[0].(map[string]any)["type"] != "text" {
 			t.Errorf("Claude messages bridged: %#v", messages)
 		}
-		cfg := payload["config"].(map[string]any)
-		if cfg["mode"] != "lossy_inline" || cfg["insert_markers"] != nil {
-			t.Errorf("config = %#v", cfg)
+		if _, hasMode := payload["config"]; hasMode {
+			t.Errorf("config should not be sent: %#v", payload)
 		}
 		_, _ = w.Write([]byte(`{"messages":[],"compression_skipped":true,"skip_reason":"no reduction","ratio":1,"transforms":[]}`))
 	}))
