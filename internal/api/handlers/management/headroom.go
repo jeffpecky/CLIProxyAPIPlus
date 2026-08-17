@@ -121,7 +121,7 @@ func (h *Handler) HeadroomStatus(c *gin.Context) {
 	})
 }
 
-// HeadroomInstall installs the Headroom CLI. Tries pipx first, falls back to pip.
+// HeadroomInstall installs the Headroom CLI. Tries pipx first, then pip variants.
 func (h *Handler) HeadroomInstall(c *gin.Context) {
 	var body struct {
 		Extras []string `json:"extras"`
@@ -136,32 +136,36 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
 	defer cancel()
 
-	// Try pipx first (handles PEP 668 / externally-managed-environment)
+	// Strategy 1: pipx (best for CLI tools — isolated venv, binary on PATH)
 	if _, err := exec.LookPath("pipx"); err == nil {
 		cmd := exec.CommandContext(ctx, "pipx", "install", "--force", spec)
 		if output, err := cmd.CombinedOutput(); err == nil {
 			_ = output
-			c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled()})
+			c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pipx"})
 			return
 		}
 	}
 
-	// Try pip with --break-system-packages (for PEP 668 systems)
-	cmd := exec.CommandContext(ctx, "pip", "install", "--break-system-packages", "--upgrade", spec)
-	if _, err := cmd.CombinedOutput(); err != nil {
-		// Final fallback: plain pip (may work in venvs)
-		cmd2 := exec.CommandContext(ctx, "pip", "install", "--upgrade", spec)
-		output2, err2 := cmd2.CombinedOutput()
-		if err2 != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"error":   fmt.Sprintf("pip install failed: %v\n%s", err2, string(output2)),
-			})
-			return
-		}
+	// Strategy 2: pip --break-system-packages (system-wide on PEP 668 systems)
+	cmd2 := exec.CommandContext(ctx, "pip", "install", "--break-system-packages", "--upgrade", spec)
+	if _, err := cmd2.CombinedOutput(); err == nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pip-system"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled()})
+	// Strategy 3: pip --user (installs to ~/.local/bin, usually on PATH)
+	cmd3 := exec.CommandContext(ctx, "pip", "install", "--user", "--upgrade", spec)
+	output3, err3 := cmd3.CombinedOutput()
+	if err3 == nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pip-user"})
+		return
+	}
+
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"success": false,
+		"error":   fmt.Sprintf("All install methods failed. Last error: %v\n%s", err3, string(output3)),
+		"hint":    "Install pipx (pip install pipx) or create a venv first, then retry.",
+	})
 }
 
 // HeadroomStart starts the Headroom proxy process.
