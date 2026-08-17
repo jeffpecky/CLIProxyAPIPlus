@@ -212,7 +212,7 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 	cmd := exec.Command("headroom", args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	setHideWindow(cmd)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
