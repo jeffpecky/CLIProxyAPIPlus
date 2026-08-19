@@ -203,6 +203,15 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 
 	args := []string{"proxy", "--port", strconv.Itoa(port)}
 
+	// Pass compression flags matching 9Router's extrasProxyArgs() behavior.
+	if cfg.TokenSaver.Headroom.CodeAware {
+		args = append(args, "--code-aware")
+	}
+	// Kompress defaults to enabled; only pass --disable-kompress when explicitly false.
+	if cfg.TokenSaver.Headroom.Kompress != nil && !*cfg.TokenSaver.Headroom.Kompress {
+		args = append(args, "--disable-kompress")
+	}
+
 	if err := os.MkdirAll(filepath.Dir(headroomLogPath), 0o700); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -240,6 +249,10 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 	managedProcess = &managedHeadroom{pid: pid}
 	headroomMu.Unlock()
 
+	// Wait for the process to either stay alive briefly (success) or exit
+	// fast (failure) — matches 9Router's lenient PID-alive check instead of
+	// a strict HTTP health probe that can fail during slow startup.
+	exitCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		logFile.Close()
@@ -249,24 +262,21 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		}
 		headroomMu.Unlock()
 		clearHeadroomPID()
+		close(exitCh)
 	}()
 
-	// Wait for Headroom to become healthy
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	for i := 0; i < 40; i++ {
-		time.Sleep(200 * time.Millisecond)
-		if headroomHealthy(url) {
-			c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid})
-			return
-		}
+	const startupTimeout = 8 * time.Second
+	select {
+	case <-time.After(startupTimeout):
+		// Process survived the startup window — consider it started.
+		c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid})
+	case <-exitCh:
+		// Process exited during startup.
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Headroom proxy exited during startup — see headroom/proxy.log.",
+		})
 	}
-
-	_ = cmd.Process.Kill()
-	clearHeadroomPID()
-	c.JSON(http.StatusInternalServerError, gin.H{
-		"success": false,
-		"error":   "Headroom proxy did not become healthy. See headroom/proxy.log.",
-	})
 }
 
 // HeadroomStop stops the managed Headroom proxy process.

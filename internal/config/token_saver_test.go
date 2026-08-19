@@ -37,7 +37,6 @@ token-saver:
     url: "http://127.0.0.1:20129"
     timeout-ms: 99
     compress-user-messages: true
-    proxy-token-env: HEADROOM_PROXY_TOKEN
   pxpipe:
     enabled: true
     min-chars: 123
@@ -52,7 +51,7 @@ token-saver:
 	if cfg.TokenSaver.Caveman.Level != "terse" || cfg.TokenSaver.Ponytail.Level != "standard" {
 		t.Fatalf("prompt levels not parsed: %+v", cfg.TokenSaver)
 	}
-	if cfg.TokenSaver.Headroom.URL != "http://127.0.0.1:20129" || !cfg.TokenSaver.Headroom.CompressUserMessages || cfg.TokenSaver.Headroom.ProxyTokenEnv != "HEADROOM_PROXY_TOKEN" {
+	if cfg.TokenSaver.Headroom.URL != "http://127.0.0.1:20129" || !cfg.TokenSaver.Headroom.CompressUserMessages {
 		t.Fatalf("headroom not parsed: %+v", cfg.TokenSaver.Headroom)
 	}
 	if cfg.TokenSaver.PXPipe.MinChars != 123 || cfg.TokenSaver.PXPipe.TimeoutMS != 456 {

@@ -60,7 +60,8 @@ debug: false
 #     url: "http://127.0.0.1:20129"
 #     timeout-ms: 3000
 #     compress-user-messages: false
-#     proxy-token-env: "HEADROOM_PROXY_TOKEN"
+#     code-aware: false
+#     kompress: true
 #   pxpipe:
 #     # Runtime paused. Keep disabled.
 #     enabled: false

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -86,9 +85,6 @@ func applyHeadroom(root any, opts Options) (any, headroomResult) {
 		return root, result
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if token := os.Getenv(strings.TrimSpace(opts.Config.Headroom.ProxyTokenEnv)); token != "" {
-		req.Header.Set("X-Headroom-Proxy-Token", token)
-	}
 	client := http.Client{Timeout: time.Duration(timeout) * time.Millisecond}
 	resp, err := client.Do(req)
 	if err != nil {

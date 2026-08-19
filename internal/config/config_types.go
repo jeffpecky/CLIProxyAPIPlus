@@ -275,7 +275,8 @@ type TokenSaverHeadroomConfig struct {
 	URL                  string `yaml:"url" json:"url"`
 	TimeoutMS            int    `yaml:"timeout-ms" json:"timeout-ms"`
 	CompressUserMessages bool   `yaml:"compress-user-messages" json:"compress-user-messages"`
-	ProxyTokenEnv        string `yaml:"proxy-token-env" json:"proxy-token-env"`
+	CodeAware            bool   `yaml:"code-aware" json:"code-aware"`
+	Kompress             *bool  `yaml:"kompress" json:"kompress"`
 }
 
 type TokenSaverPXPipeConfig struct {

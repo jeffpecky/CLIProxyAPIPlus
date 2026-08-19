@@ -7,48 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
-
-func TestHeadroomUsesNativeClaudeContract(t *testing.T) {
-	const envName = "TEST_HEADROOM_PROXY_TOKEN"
-	t.Setenv(envName, "secret-value")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Headroom-Proxy-Token"); got != "secret-value" {
-			t.Errorf("proxy token = %q", got)
-		}
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload["model"] != "claude-upstream-final" {
-			t.Errorf("model = %v", payload["model"])
-		}
-		messages := payload["messages"].([]any)
-		content := messages[0].(map[string]any)["content"].([]any)
-		if content[0].(map[string]any)["type"] != "text" {
-			t.Errorf("Claude messages bridged: %#v", messages)
-		}
-		if _, hasMode := payload["config"]; hasMode {
-			t.Errorf("config should not be sent: %#v", payload)
-		}
-		_, _ = w.Write([]byte(`{"messages":[],"compression_skipped":true,"skip_reason":"no reduction","ratio":1,"transforms":[]}`))
-	}))
-	t.Cleanup(server.Close)
-	body := []byte(`{"model":"wrong","system":"keep","tools":[{"name":"x"}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
-	out, stats := Apply(Options{Body: body, Model: "claude-upstream-final", Format: "claude", Config: config.TokenSaverConfig{Enabled: true, Headroom: config.TokenSaverHeadroomConfig{Enabled: true, URL: server.URL, TimeoutMS: 1000, ProxyTokenEnv: envName}}})
-	if !bytes.Equal(out, body) || stats.Headroom || stats.HeadroomSkip != "no reduction" || stats.HeadroomStats.Ratio != 1 {
-		t.Fatalf("skip contract ignored: stats=%+v body=%s", stats, out)
-	}
-	if os.Getenv(envName) != "secret-value" {
-		t.Fatal("test environment changed")
-	}
-}
 
 func TestHeadroomParsesOfficialResponseAndRejectsCCR(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"long long long"}]}`)
