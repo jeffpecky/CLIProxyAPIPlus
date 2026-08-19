@@ -59,6 +59,7 @@ func headroomInstalled() bool {
 	cmd := exec.Command("headroom", "--version")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	setHideWindow(cmd)
 	return cmd.Run() == nil
 }
 
@@ -139,6 +140,7 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 	// Strategy 1: pipx (best for CLI tools — isolated venv, binary on PATH)
 	if _, err := exec.LookPath("pipx"); err == nil {
 		cmd := exec.CommandContext(ctx, "pipx", "install", "--force", spec)
+		setHideWindow(cmd)
 		if output, err := cmd.CombinedOutput(); err == nil {
 			_ = output
 			c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pipx"})
@@ -148,6 +150,7 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 
 	// Strategy 2: pip --break-system-packages (system-wide on PEP 668 systems)
 	cmd2 := exec.CommandContext(ctx, "pip", "install", "--break-system-packages", "--upgrade", spec)
+	setHideWindow(cmd2)
 	if _, err := cmd2.CombinedOutput(); err == nil {
 		c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pip-system"})
 		return
@@ -155,6 +158,7 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 
 	// Strategy 3: pip --user (installs to ~/.local/bin, usually on PATH)
 	cmd3 := exec.CommandContext(ctx, "pip", "install", "--user", "--upgrade", spec)
+	setHideWindow(cmd3)
 	output3, err3 := cmd3.CombinedOutput()
 	if err3 == nil {
 		c.JSON(http.StatusOK, gin.H{"success": true, "installed": headroomInstalled(), "method": "pip-user"})
