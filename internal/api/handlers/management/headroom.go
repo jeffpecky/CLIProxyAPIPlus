@@ -56,15 +56,11 @@ func headroomInstalled() bool {
 	if err != nil || path == "" {
 		return false
 	}
-	cmd := exec.Command("headroom", "--version")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	setHideWindow(cmd)
-	return cmd.Run() == nil
+	return true
 }
 
 func headroomHealthy(url string) bool {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: 1 * time.Second}
 	resp, err := client.Get(url + "/health")
 	if err != nil {
 		return false
@@ -107,8 +103,18 @@ func (h *Handler) HeadroomStatus(c *gin.Context) {
 		url = cfg.TokenSaver.Headroom.URL
 	}
 
-	installed := headroomInstalled()
-	healthy := headroomHealthy(url)
+	var installed, healthy bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		installed = headroomInstalled()
+	}()
+	go func() {
+		defer wg.Done()
+		healthy = headroomHealthy(url)
+	}()
+	wg.Wait()
 
 	pid, hasPID := readHeadroomPID()
 	managed := hasPID && pid > 0 && headroomProcessRunning(pid)
