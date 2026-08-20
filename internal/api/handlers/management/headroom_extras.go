@@ -46,6 +46,7 @@ func getInstalledHeadroomExtras() headroomExtrasStatus {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, python, "-m", "pip", "list", "--format=json", "--disable-pip-version-check")
+	setHideWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return headroomExtrasStatus{Installed: false, Extras: map[string]bool{"code": false, "ml": false}}
@@ -136,6 +137,7 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 
 	// Try pip install with --break-system-packages first, then --user.
 	cmd := exec.CommandContext(ctx, python, "-m", "pip", "install", "--break-system-packages", "--upgrade", spec)
+	setHideWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		c.JSON(200, gin.H{"success": true, "method": "pip-system", "output": string(output)})
@@ -144,6 +146,7 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 
 	// Try --user.
 	cmd2 := exec.CommandContext(ctx, python, "-m", "pip", "install", "--user", "--upgrade", spec)
+	setHideWindow(cmd2)
 	output2, err2 := cmd2.CombinedOutput()
 	if err2 == nil {
 		c.JSON(200, gin.H{"success": true, "method": "pip-user", "output": string(output2)})
@@ -182,6 +185,7 @@ func (h *Handler) HeadroomUninstallExtra(c *gin.Context) {
 	// Uninstall marker packages.
 	args := append([]string{"-m", "pip", "uninstall", "-y"}, markers...)
 	cmd := exec.CommandContext(ctx, python, args...)
+	setHideWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Uninstall failed: %v\n%s", err, string(output))})
