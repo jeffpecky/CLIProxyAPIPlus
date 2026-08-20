@@ -215,6 +215,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/headroom/start", s.mgmt.HeadroomStart)
 		mgmt.POST("/headroom/stop", s.mgmt.HeadroomStop)
 		mgmt.POST("/headroom/restart", s.mgmt.HeadroomRestart)
+
+		mgmt.GET("/headroom/extras", s.mgmt.HeadroomExtrasStatus)
+		mgmt.POST("/headroom/extras/install", s.mgmt.HeadroomInstallExtras)
+		mgmt.POST("/headroom/extras/uninstall/:extra", s.mgmt.HeadroomUninstallExtra)
 	}
 }
 
