@@ -183,15 +183,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, false, req.Metadata, opts); err != nil {
-		return resp, err
-	}
-	wireBody, errReadWire := io.ReadAll(httpReq.Body)
-	if errReadWire != nil {
-		return resp, fmt.Errorf("read final Gemini request: %w", errReadWire)
-	}
-	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -202,7 +194,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      wireBody,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -239,6 +231,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -300,15 +295,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, true, req.Metadata, opts); err != nil {
-		return nil, err
-	}
-	wireBody, errReadWire := io.ReadAll(httpReq.Body)
-	if errReadWire != nil {
-		return nil, fmt.Errorf("read final Gemini request: %w", errReadWire)
-	}
-	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -319,7 +306,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      wireBody,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -348,6 +335,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close response body error: %v", errClose)
@@ -427,24 +415,16 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
-	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, targetName, sdktranslator.FormatInteractions, false, req.Metadata, opts); err != nil {
-		return resp, err
-	}
-	wireBody, errReadWire := io.ReadAll(httpReq.Body)
-	if errReadWire != nil {
-		return resp, fmt.Errorf("read final Gemini Interactions request: %w", errReadWire)
-	}
-	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      wireBody,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -476,8 +456,12 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 		return resp, err
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
+	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, opts.OriginalRequest, body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if targetFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -511,24 +495,16 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
-	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, targetName, sdktranslator.FormatInteractions, true, req.Metadata, opts); err != nil {
-		return nil, err
-	}
-	wireBody, errReadWire := io.ReadAll(httpReq.Body)
-	if errReadWire != nil {
-		return nil, fmt.Errorf("read final Gemini Interactions request: %w", errReadWire)
-	}
-	httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      wireBody,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -678,15 +654,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	if err = cliproxyexecutor.ApplyFinalProviderRequestHook(ctx, httpReq, baseModel, to, false, req.Metadata, opts); err != nil {
-		return cliproxyexecutor.Response{}, err
-	}
-	translatedReq, err = io.ReadAll(httpReq.Body)
-	if err != nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("read final Gemini count request: %w", err)
-	}
-	httpReq.Body = io.NopCloser(bytes.NewReader(translatedReq))
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -928,12 +896,12 @@ func geminiAuthLogFields(auth *cliproxyauth.Auth) (string, string, string, strin
 	return auth.ID, auth.Label, authType, authValue
 }
 
-func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth, clientHeaders ...http.Header) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders...)
 }
 
 func capGeminiMaxOutputTokens(body []byte, modelName string) []byte {

@@ -153,6 +153,8 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
 	availableModelsCache map[string]availableModelsCacheEntry
+	// generation tracks changes to model registrations and availability.
+	generation uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 }
@@ -182,10 +184,18 @@ func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
 }
 
 func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
+	r.generation++
 	if len(r.availableModelsCache) == 0 {
 		return
 	}
 	clear(r.availableModelsCache)
+}
+
+// GetGeneration returns the current generation counter of model registrations.
+func (r *ModelRegistry) GetGeneration() uint64 {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.generation
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
@@ -783,6 +793,23 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	registration.LastUpdated = time.Now()
 	r.invalidateAvailableModelsCacheLocked()
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
+}
+
+// GetClientModelSuspensionReason returns the reason a client model was suspended, or empty string if not suspended.
+func (r *ModelRegistry) GetClientModelSuspensionReason(clientID, modelID string) string {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return ""
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.SuspendedClients == nil {
+		return ""
+	}
+	return registration.SuspendedClients[clientID]
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
