@@ -147,11 +147,6 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 		return
 	}
 
-	// Run pip install with output captured to log file
-	args := []string{"-m", "pip", "install", "--upgrade", spec}
-	cmd := exec.Command(python, args...)
-	setHideWindow(cmd)
-
 	// Ensure headroom directory exists
 	if err := os.MkdirAll(filepath.Dir(installLogPath), 0o700); err != nil {
 		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log directory: %v", err)})
@@ -164,6 +159,18 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log file: %v", err)})
 		return
 	}
+	logFile.Close()
+
+	// Run pip install asynchronously (non-blocking)
+	args := []string{"-m", "pip", "install", "--upgrade", spec}
+	cmd := exec.Command(python, args...)
+	setHideWindow(cmd)
+
+	logFile, err = os.OpenFile(installLogPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to open log file: %v", err)})
+		return
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -173,17 +180,14 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 		return
 	}
 
-	// Wait for completion
-	err = cmd.Wait()
-	logFile.Close()
+	// Return immediately - log polling will show progress
+	c.JSON(200, gin.H{"success": true, "spec": spec, "extras": body.Extras, "status": "installing"})
 
-	if err != nil {
-		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Install failed: %v", err)})
-		return
-	}
-
-	status := getInstalledHeadroomExtras()
-	c.JSON(200, gin.H{"success": true, "spec": spec, "extras": body.Extras, "version": status.Version})
+	// Wait in background and close log file when done
+	go func() {
+		_ = cmd.Wait()
+		logFile.Close()
+	}()
 }
 
 // HeadroomUninstallExtra uninstalls a headroom extra and its packages.
@@ -206,11 +210,6 @@ func (h *Handler) HeadroomUninstallExtra(c *gin.Context) {
 		return
 	}
 
-	// Run pip uninstall with output captured to log file
-	args := append([]string{"-m", "pip", "uninstall", "-y"}, markers...)
-	cmd := exec.Command(python, args...)
-	setHideWindow(cmd)
-
 	// Ensure headroom directory exists
 	if err := os.MkdirAll(filepath.Dir(installLogPath), 0o700); err != nil {
 		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log directory: %v", err)})
@@ -223,6 +222,18 @@ func (h *Handler) HeadroomUninstallExtra(c *gin.Context) {
 		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log file: %v", err)})
 		return
 	}
+	logFile.Close()
+
+	// Run pip uninstall asynchronously (non-blocking)
+	args := append([]string{"-m", "pip", "uninstall", "-y"}, markers...)
+	cmd := exec.Command(python, args...)
+	setHideWindow(cmd)
+
+	logFile, err = os.OpenFile(installLogPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to open log file: %v", err)})
+		return
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -232,17 +243,14 @@ func (h *Handler) HeadroomUninstallExtra(c *gin.Context) {
 		return
 	}
 
-	// Wait for completion
-	err = cmd.Wait()
-	logFile.Close()
+	// Return immediately - log polling will show progress
+	c.JSON(200, gin.H{"success": true, "removed": markers, "extras": []string{extra}, "status": "uninstalling"})
 
-	if err != nil {
-		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Uninstall failed: %v", err)})
-		return
-	}
-
-	status := getInstalledHeadroomExtras()
-	c.JSON(200, gin.H{"success": true, "removed": markers, "extras": []string{extra}, "version": status.Version})
+	// Wait in background and close log file when done
+	go func() {
+		_ = cmd.Wait()
+		logFile.Close()
+	}()
 }
 
 // readInstallLogTail reads the last N lines of the install log file.
