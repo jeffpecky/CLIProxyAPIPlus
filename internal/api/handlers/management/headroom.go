@@ -92,41 +92,6 @@ func headroomExtractPort(url string) int {
 	return 8787
 }
 
-// findPIDByPort finds the PID of the process listening on the given port.
-func findPIDByPort(port int) int {
-	cmd := exec.Command("netstat", "-ano")
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-	portStr := strconv.Itoa(port)
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, ":"+portStr) && strings.Contains(line, "LISTENING") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				if pid, err := strconv.Atoi(fields[len(fields)-1]); err == nil && pid > 0 {
-					return pid
-				}
-			}
-		}
-	}
-	return 0
-}
-
-// killPortProcess kills the process listening on the given port.
-func killPortProcess(port int) {
-	pid := findPIDByPort(port)
-	if pid <= 0 {
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	_ = proc.Kill()
-}
-
 // HeadroomStatus returns the current Headroom installation and process status.
 func (h *Handler) HeadroomStatus(c *gin.Context) {
 	h.mu.Lock()
@@ -235,25 +200,6 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		return
 	}
 	clearHeadroomPID()
-
-	// Check if the port is already in use by another process (e.g. headroom
-	// started manually or from a previous session without a PID file).
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if headroomHealthy(url) {
-		// Something is already serving on this port and responding to /health.
-		// Try to find its PID and adopt it.
-		if pid := findPIDByPort(port); pid > 0 {
-			_ = writeHeadroomPID(pid)
-			headroomMu.Lock()
-			managedProcess = &managedHeadroom{pid: pid}
-			headroomMu.Unlock()
-			c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid, "adopted": true})
-			return
-		}
-		// Port is in use but we can't identify the PID — kill whatever is there.
-		killPortProcess(port)
-		time.Sleep(500 * time.Millisecond)
-	}
 
 	args := []string{"proxy", "--port", strconv.Itoa(port)}
 
