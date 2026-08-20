@@ -1,11 +1,15 @@
 package management
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +25,11 @@ var headroomExtraMarkers = map[string][]string{
 }
 
 const headroomPipTimeoutMs = 8000
+
+var (
+	installLogPath = filepath.Join("headroom", "install.log")
+	installLogMu   sync.Mutex
+)
 
 // pipPackage represents a package from pip list --format=json.
 type pipPackage struct {
@@ -101,6 +110,12 @@ func getInstalledHeadroomExtras() headroomExtrasStatus {
 
 // HeadroomExtrasStatus returns the current extras installation status.
 func (h *Handler) HeadroomExtrasStatus(c *gin.Context) {
+	// Support ?log=1 for live install log polling
+	if c.Query("log") == "1" {
+		log := readInstallLogTail(15)
+		c.JSON(200, gin.H{"log": log})
+		return
+	}
 	status := getInstalledHeadroomExtras()
 	c.JSON(200, status)
 }
@@ -126,37 +141,49 @@ func (h *Handler) HeadroomInstallExtras(c *gin.Context) {
 	// Build install spec.
 	spec := fmt.Sprintf("headroom-ai[proxy,%s]", strings.Join(body.Extras, ","))
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
-	defer cancel()
-
 	python := findPython()
 	if python == "" {
 		c.JSON(500, gin.H{"success": false, "error": "Python not found. Install Python 3.10+ first."})
 		return
 	}
 
-	// Try pip install with --break-system-packages first, then --user.
-	cmd := exec.CommandContext(ctx, python, "-m", "pip", "install", "--break-system-packages", "--upgrade", spec)
+	// Run pip install with output captured to log file
+	args := []string{"-m", "pip", "install", "--upgrade", spec}
+	cmd := exec.Command(python, args...)
 	setHideWindow(cmd)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		c.JSON(200, gin.H{"success": true, "method": "pip-system", "output": string(output)})
+
+	// Ensure headroom directory exists
+	if err := os.MkdirAll(filepath.Dir(installLogPath), 0o700); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log directory: %v", err)})
 		return
 	}
 
-	// Try --user.
-	cmd2 := exec.CommandContext(ctx, python, "-m", "pip", "install", "--user", "--upgrade", spec)
-	setHideWindow(cmd2)
-	output2, err2 := cmd2.CombinedOutput()
-	if err2 == nil {
-		c.JSON(200, gin.H{"success": true, "method": "pip-user", "output": string(output2)})
+	// Truncate log file for fresh output
+	logFile, err := os.Create(installLogPath)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log file: %v", err)})
+		return
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to start pip install: %v", err)})
 		return
 	}
 
-	c.JSON(500, gin.H{
-		"success": false,
-		"error":   fmt.Sprintf("Install failed. Last error: %v\n%s", err2, string(output2)),
-	})
+	// Wait for completion
+	err = cmd.Wait()
+	logFile.Close()
+
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Install failed: %v", err)})
+		return
+	}
+
+	status := getInstalledHeadroomExtras()
+	c.JSON(200, gin.H{"success": true, "spec": spec, "extras": body.Extras, "version": status.Version})
 }
 
 // HeadroomUninstallExtra uninstalls a headroom extra and its packages.
@@ -179,20 +206,66 @@ func (h *Handler) HeadroomUninstallExtra(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
-	defer cancel()
-
-	// Uninstall marker packages.
+	// Run pip uninstall with output captured to log file
 	args := append([]string{"-m", "pip", "uninstall", "-y"}, markers...)
-	cmd := exec.CommandContext(ctx, python, args...)
+	cmd := exec.Command(python, args...)
 	setHideWindow(cmd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Uninstall failed: %v\n%s", err, string(output))})
+
+	// Ensure headroom directory exists
+	if err := os.MkdirAll(filepath.Dir(installLogPath), 0o700); err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log directory: %v", err)})
 		return
 	}
 
-	c.JSON(200, gin.H{"success": true, "output": string(output)})
+	// Truncate log file for fresh output
+	logFile, err := os.Create(installLogPath)
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to create log file: %v", err)})
+		return
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Failed to start pip uninstall: %v", err)})
+		return
+	}
+
+	// Wait for completion
+	err = cmd.Wait()
+	logFile.Close()
+
+	if err != nil {
+		c.JSON(500, gin.H{"success": false, "error": fmt.Sprintf("Uninstall failed: %v", err)})
+		return
+	}
+
+	status := getInstalledHeadroomExtras()
+	c.JSON(200, gin.H{"success": true, "removed": markers, "extras": []string{extra}, "version": status.Version})
+}
+
+// readInstallLogTail reads the last N lines of the install log file.
+func readInstallLogTail(maxLines int) string {
+	installLogMu.Lock()
+	defer installLogMu.Unlock()
+
+	f, err := os.Open(installLogPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // findPython locates a Python 3.10+ interpreter.
