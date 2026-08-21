@@ -90,6 +90,24 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	// Register post-fetch hook for OpenCode models: after async fetch completes,
+	// re-register models for all opencode auths so the scheduler picks them up.
+	if s.coreManager != nil {
+		refreshOpenCodeAuths := func() {
+			for _, auth := range s.coreManager.List() {
+				if auth != nil && !auth.Disabled && auth.Provider == "opencode" {
+					s.registerModelsForAuth(ctx, auth)
+					s.coreManager.RefreshSchedulerEntry(auth.ID)
+				}
+			}
+		}
+		registry.SetOpenCodePostFetchHook(refreshOpenCodeAuths)
+		// If models were already fetched before the hook was set, refresh now.
+		if registry.GetOpenCodeModelsFromRemote() != nil {
+			refreshOpenCodeAuths()
+		}
+	}
+
 	if !homeEnabled {
 		tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {

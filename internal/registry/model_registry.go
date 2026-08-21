@@ -505,6 +505,79 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	misc.LogCredentialSeparator()
 }
 
+// RegisterOpenCodeModels registers OpenCode models directly in the registry.
+// This is used for free providers without authentication.
+func (r *ModelRegistry) RegisterOpenCodeModels(models []*ModelInfo) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	const provider = "opencode"
+	const clientID = "opencode-free"
+
+	now := time.Now()
+
+	// Get existing models for this client
+	existingModels := make(map[string]struct{})
+	if oldModelIDs, ok := r.clientModels[clientID]; ok {
+		for _, id := range oldModelIDs {
+			existingModels[id] = struct{}{}
+		}
+	}
+
+	// Build new model list
+	newModelIDs := make([]string, 0, len(models))
+	newModels := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model == nil || model.ID == "" {
+			continue
+		}
+		newModelIDs = append(newModelIDs, model.ID)
+		newModels[model.ID] = model
+	}
+
+	// Find added and removed models
+	var added, removed []string
+	for id := range existingModels {
+		if _, ok := newModels[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	for _, id := range newModelIDs {
+		if _, ok := existingModels[id]; !ok {
+			added = append(added, id)
+		}
+	}
+
+	// Remove old models
+	for _, id := range removed {
+		r.removeModelRegistration(clientID, id, provider, now)
+	}
+
+	// Add new models
+	for _, id := range newModelIDs {
+		if _, existed := existingModels[id]; !existed {
+			r.addModelRegistration(id, provider, newModels[id], now)
+		}
+	}
+
+	// Update client bookkeeping
+	r.clientModels[clientID] = append([]string(nil), newModelIDs...)
+	clientInfos := make(map[string]*ModelInfo, len(newModels))
+	for id, m := range newModels {
+		clientInfos[id] = cloneModelInfo(m)
+	}
+	r.clientModelInfos[clientID] = clientInfos
+	r.clientProviders[clientID] = provider
+
+	r.invalidateAvailableModelsCacheLocked()
+	r.triggerModelsRegistered(provider, clientID, models)
+
+	if len(added) > 0 || len(removed) > 0 {
+		log.Debugf("Registered OpenCode models: +%d, -%d", len(added), len(removed))
+	}
+}
+
 func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time) {
 	if model == nil || modelID == "" {
 		return

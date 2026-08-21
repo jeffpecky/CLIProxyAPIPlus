@@ -232,6 +232,12 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			}
 		}
 	}
+	// Read base_url from auth file for OpenAI-compatible providers.
+	if baseURL, ok := metadata["base_url"].(string); ok {
+		if trimmed := strings.TrimSpace(baseURL); trimmed != "" {
+			a.Attributes["base_url"] = trimmed
+		}
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")

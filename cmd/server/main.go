@@ -1003,6 +1003,8 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background())
+		registry.SetOpenCodeModelsEnabled(true)
+		registry.StartOpenCodeModelsUpdater(context.Background())
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}

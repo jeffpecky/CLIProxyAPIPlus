@@ -600,6 +600,9 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 		attr["email"] = email
 	}
+	if baseURL := strings.TrimSpace(valueAsString(metadata["base_url"])); baseURL != "" {
+		attr["base_url"] = baseURL
+	}
 	auth := &cliproxyauth.Auth{
 		ID:               rel,
 		Provider:         provider,

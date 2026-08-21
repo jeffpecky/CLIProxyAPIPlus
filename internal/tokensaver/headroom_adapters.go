@@ -194,20 +194,6 @@ func appendPath(prefix []any, parts ...any) []any {
 	return append(path, parts...)
 }
 
-func rolesMatch(expected, actual []any) bool {
-	if len(expected) != len(actual) {
-		return false
-	}
-	for i := range expected {
-		a, okA := expected[i].(map[string]any)
-		b, okB := actual[i].(map[string]any)
-		if !okA || !okB || a["role"] != b["role"] {
-			return false
-		}
-	}
-	return true
-}
-
 func messagesStructurallyMatch(expected, actual []any) bool {
 	if len(expected) != len(actual) {
 		return false

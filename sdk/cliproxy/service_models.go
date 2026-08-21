@@ -168,6 +168,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "opencode":
+		models = applyExcludedModels(registry.GetOpenCodeModelsFromRemote(), excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -286,6 +288,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		return
+	}
+
+	// OpenCode models are fetched asynchronously; don't unregister while pending.
+	if provider == "opencode" {
 		return
 	}
 

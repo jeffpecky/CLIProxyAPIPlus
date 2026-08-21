@@ -33,6 +33,7 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
+	OpenCode    []*ModelInfo `json:"opencode"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -345,6 +346,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetXAIModels()
 	case "qoder":
 		return GetQoderModels()
+	case "opencode":
+		return nil
 	default:
 		return nil
 	}
@@ -381,6 +384,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Antigravity,
 		data.XAI,
 		data.Qoder,
+		data.OpenCode,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
