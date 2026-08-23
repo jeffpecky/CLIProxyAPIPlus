@@ -22,10 +22,10 @@ type managedHeadroom struct {
 }
 
 var (
-	headroomMu       sync.Mutex
-	managedProcess   *managedHeadroom
-	headroomPIDPath  = filepath.Join("headroom", "proxy.pid")
-	headroomLogPath  = filepath.Join("headroom", "proxy.log")
+	headroomMu      sync.Mutex
+	managedProcess  *managedHeadroom
+	headroomPIDPath = filepath.Join("headroom", "proxy.pid")
+	headroomLogPath = filepath.Join("headroom", "proxy.log")
 )
 
 func readHeadroomPID() (int, bool) {
@@ -67,6 +67,34 @@ func headroomHealthy(url string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func waitForHeadroomHealthy(url string, timeout, interval time.Duration, healthy func(string) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if healthy(url) {
+			return true
+		}
+		if time.Now().Add(interval).After(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
+}
+
+func stopHeadroomPID(pid int) {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if !headroomProcessRunning(pid) {
+			return
+		}
+	}
+	_ = proc.Kill()
 }
 
 func headroomProcessRunning(pid int) bool {
@@ -180,6 +208,27 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 
 // HeadroomStart starts the Headroom proxy process.
 func (h *Handler) HeadroomStart(c *gin.Context) {
+	h.mu.Lock()
+	cfg := h.cfg
+	h.mu.Unlock()
+
+	url := "http://127.0.0.1:8787"
+	if cfg.TokenSaver.Headroom.URL != "" {
+		url = cfg.TokenSaver.Headroom.URL
+	}
+	port := headroomExtractPort(url)
+
+	if headroomHealthy(url) {
+		pid, hasPID := readHeadroomPID()
+		managed := hasPID && pid > 0 && headroomProcessRunning(pid)
+		response := gin.H{"success": true, "managed": managed}
+		if managed {
+			response["pid"] = pid
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
 	if !headroomInstalled() {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -188,16 +237,8 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	cfg := h.cfg
-	h.mu.Unlock()
-
-	port := headroomExtractPort(cfg.TokenSaver.Headroom.URL)
-
-	// Check if already running via our managed PID file.
 	if pid, ok := readHeadroomPID(); ok && headroomProcessRunning(pid) {
-		c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid})
-		return
+		stopHeadroomPID(pid)
 	}
 	clearHeadroomPID()
 
@@ -249,9 +290,6 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 	managedProcess = &managedHeadroom{pid: pid}
 	headroomMu.Unlock()
 
-	// Wait for the process to either stay alive briefly (success) or exit
-	// fast (failure) — matches 9Router's lenient PID-alive check instead of
-	// a strict HTTP health probe that can fail during slow startup.
 	exitCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -267,11 +305,18 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 
 	const startupTimeout = 8 * time.Second
 	select {
-	case <-time.After(startupTimeout):
-		// Process survived the startup window — consider it started.
+	case <-time.After(100 * time.Millisecond):
+		if !waitForHeadroomHealthy(url, startupTimeout, 200*time.Millisecond, headroomHealthy) {
+			_ = cmd.Process.Kill()
+			clearHeadroomPID()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Headroom proxy started but did not become healthy — see headroom/proxy.log.",
+			})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid})
 	case <-exitCh:
-		// Process exited during startup.
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   "Headroom proxy exited during startup — see headroom/proxy.log.",
