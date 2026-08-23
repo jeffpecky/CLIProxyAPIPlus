@@ -66,7 +66,7 @@ func TestApplyInvalidJSONReturnsOriginal(t *testing.T) {
 
 func TestCavemanInjectsOpenAISystem(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
-	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "terse"}}})
+	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "full"}}})
 	if !stats.Caveman || !bytes.Contains(out, []byte("Respond like terse caveman")) {
 		t.Fatalf("caveman not injected: stats=%+v body=%s", stats, out)
 	}
@@ -80,7 +80,7 @@ func TestOpenAISystemArrayUsesProtocolContentType(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			out, _ := Apply(Options{Body: []byte(test.body), Format: test.format, Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "terse"}}})
+			out, _ := Apply(Options{Body: []byte(test.body), Format: test.format, Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "full"}}})
 			if got := gjson.GetBytes(out, map[string]string{"openai": "messages.0.content.1.type", "openai-response": "input.0.content.1.type"}[test.format]).String(); got != test.want {
 				t.Fatalf("content type = %q, want %q; body=%s", got, test.want, out)
 			}
@@ -109,7 +109,7 @@ func TestHeadroomRejectsStructuralMessageChanges(t *testing.T) {
 
 func TestPonytailInjectsClaudeSystem(t *testing.T) {
 	body := []byte(`{"model":"m","system":"base","messages":[{"role":"user","content":"hi"}]}`)
-	out, stats := Apply(Options{Body: body, Format: "claude", Config: config.TokenSaverConfig{Enabled: true, Ponytail: config.TokenSaverPromptConfig{Enabled: true, Level: "standard"}}})
+	out, stats := Apply(Options{Body: body, Format: "claude", Config: config.TokenSaverConfig{Enabled: true, Ponytail: config.TokenSaverPromptConfig{Enabled: true, Level: "full"}}})
 	if !stats.Ponytail || !bytes.Contains(out, []byte("lazy senior developer")) {
 		t.Fatalf("ponytail not injected: stats=%+v body=%s", stats, out)
 	}
@@ -117,7 +117,7 @@ func TestPonytailInjectsClaudeSystem(t *testing.T) {
 
 func TestCavemanInjectsGeminiSystemInstruction(t *testing.T) {
 	body := []byte(`{"model":"m","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	out, stats := Apply(Options{Body: body, Format: "gemini", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "terse"}}})
+	out, stats := Apply(Options{Body: body, Format: "gemini", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: "full"}}})
 	if !stats.Caveman || !bytes.Contains(out, []byte("systemInstruction")) || !bytes.Contains(out, []byte("Respond like terse caveman")) {
 		t.Fatalf("gemini caveman not injected: stats=%+v body=%s", stats, out)
 	}
@@ -215,6 +215,24 @@ func TestHeadroomCompressesSafeResponsesInput(t *testing.T) {
 	out, stats := applyHeadroomResponse(t, body, "openai-response", `{"messages":[{"role":"user","content":"hi"}]}`)
 	if !stats.Headroom || !bytes.Contains(out, []byte(`"type":"message"`)) || !bytes.Contains(out, []byte(`"content":"hi"`)) {
 		t.Fatalf("responses not compressed: stats=%+v body=%s", stats, out)
+	}
+}
+
+func TestHeadroomResponsesIncludesInstructionsForProxy(t *testing.T) {
+	body := []byte(`{"model":"m","instructions":"long system long system long system","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello hello hello hello hello"}]}]}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if !bytes.Contains(raw, []byte(`"role":"system"`)) || !bytes.Contains(raw, []byte(`long system`)) {
+			t.Fatalf("instructions missing from Headroom request: %s", raw)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"messages":[{"role":"system","content":"compressed system"},{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	out, stats := Apply(Options{Body: body, Format: "openai-response", Config: config.TokenSaverConfig{Enabled: true, Headroom: config.TokenSaverHeadroomConfig{Enabled: true, URL: server.URL, TimeoutMS: 1000}}})
+	if !stats.Headroom || !bytes.Contains(out, []byte(`"instructions":"compressed system"`)) || !bytes.Contains(out, []byte(`"text":"hi"`)) {
+		t.Fatalf("responses instructions not compressed: stats=%+v body=%s", stats, out)
 	}
 }
 

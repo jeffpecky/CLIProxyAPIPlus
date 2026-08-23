@@ -57,7 +57,11 @@ func projectResponsesHeadroom(root map[string]any) (*headroomProjection, string)
 	if !ok || len(input) == 0 {
 		return nil, "responses input missing"
 	}
-	messages := make([]any, 0, len(input))
+	instructions, hasInstructions := root["instructions"].(string)
+	messages := make([]any, 0, len(input)+1)
+	if hasInstructions && instructions != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": instructions})
+	}
 	for _, item := range input {
 		message, ok := item.(map[string]any)
 		if !ok || message["type"] != "message" {
@@ -69,10 +73,24 @@ func projectResponsesHeadroom(root map[string]any) (*headroomProjection, string)
 		if !messagesStructurallyMatch(messages, compressed) {
 			return nil, "compressed Responses message structure changed"
 		}
+		messageOffset := 0
+		nextInstructions := instructions
+		if hasInstructions && instructions != "" {
+			message, ok := compressed[0].(map[string]any)
+			if !ok {
+				return nil, "compressed Responses instructions invalid"
+			}
+			text, ok := messageText(message["content"])
+			if !ok {
+				return nil, "compressed Responses instructions missing"
+			}
+			nextInstructions = text
+			messageOffset = 1
+		}
 		restored := make([]any, len(input))
 		for i, item := range input {
 			original := cloneObject(item.(map[string]any))
-			message, ok := compressed[i].(map[string]any)
+			message, ok := compressed[i+messageOffset].(map[string]any)
 			if !ok {
 				return nil, "compressed Responses message invalid"
 			}
@@ -80,6 +98,9 @@ func projectResponsesHeadroom(root map[string]any) (*headroomProjection, string)
 			restored[i] = original
 		}
 		next := cloneObject(root)
+		if hasInstructions && instructions != "" {
+			next["instructions"] = nextInstructions
+		}
 		next["input"] = restored
 		return next, ""
 	}}, ""
