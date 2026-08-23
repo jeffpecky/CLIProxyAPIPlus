@@ -82,6 +82,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	rawJSON = normalizeClaudeCodeModelInBody(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -114,6 +115,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	rawJSON = normalizeClaudeCodeModelInBody(rawJSON)
 
 	c.Header("Content-Type", "application/json")
 
@@ -146,6 +148,37 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	return updated
+}
+
+func normalizeClaudeCodeModelInBody(rawJSON []byte) []byte {
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	normalized := normalizeClaudeCodeModelName(modelName)
+	if normalized == modelName {
+		return rawJSON
+	}
+	updated, errSet := sjson.SetBytes(rawJSON, "model", normalized)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeClaudeCodeModelName(model string) string {
+	model = strings.TrimSpace(model)
+	thinkingStart := strings.LastIndex(model, "(")
+	if thinkingStart >= 0 && strings.HasSuffix(model, ")") {
+		base := stripClaudeCodeContextSuffix(model[:thinkingStart])
+		return base + model[thinkingStart:]
+	}
+	return stripClaudeCodeContextSuffix(model)
+}
+
+func stripClaudeCodeContextSuffix(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasSuffix(strings.ToLower(model), "[1m]") {
+		return strings.TrimSpace(model[:len(model)-len("[1m]")])
+	}
+	return model
 }
 
 // ClaudeModels handles the Claude models listing endpoint.

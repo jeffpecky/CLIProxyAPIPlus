@@ -118,3 +118,32 @@ func TestRewriteClaudeDDModelInBody(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeClaudeCodeModelName(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain model", in: "gpt-5.5", want: "gpt-5.5"},
+		{name: "context suffix", in: "gpt-5.5[1m]", want: "gpt-5.5"},
+		{name: "context suffix with thinking", in: "gpt-5.5[1m](high)", want: "gpt-5.5(high)"},
+		{name: "thinking only", in: "gpt-5.5(high)", want: "gpt-5.5(high)"},
+		{name: "spaces", in: " gpt-5.5[1m] ", want: "gpt-5.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeClaudeCodeModelName(tt.in); got != tt.want {
+				t.Fatalf("normalizeClaudeCodeModelName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeClaudeCodeModelInBody(t *testing.T) {
+	body := normalizeClaudeCodeModelInBody([]byte(`{"model":"gpt-5.5[1m]","messages":[]}`))
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; body=%s", got, string(body))
+	}
+}
