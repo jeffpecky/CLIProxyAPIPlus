@@ -48,6 +48,13 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, err
 	}
 	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, prepared.baseModel, sdktranslator.FromString("openai_response"), false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		prepared.body = hookedBody
+	}
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

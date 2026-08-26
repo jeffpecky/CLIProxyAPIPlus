@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -42,6 +43,13 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, prepared.baseModel, sdktranslator.FromString("openai_response"), true, req, opts)
+	if errHook != nil {
+		return nil, errHook
+	}
+	if hookedBody != nil {
+		prepared.body = hookedBody
+	}
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

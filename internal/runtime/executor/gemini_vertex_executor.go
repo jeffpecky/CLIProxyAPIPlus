@@ -370,6 +370,13 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, sdktranslator.FromString("gemini"), false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -498,6 +505,13 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -615,6 +629,13 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if errHook != nil {
+		return nil, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -762,6 +783,13 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if errHook != nil {
+		return nil, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

@@ -359,6 +359,9 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 			log.Debugf("cursor CountTokens: model=%s result=%s", req.Model, string(resp.Payload))
 		}
 	}()
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return resp, err
+	}
 	model := gjson.GetBytes(req.Payload, "model").String()
 	if model == "" {
 		model = req.Model
@@ -414,6 +417,10 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Warnf("cursor Execute error: %v", err)
 		}
 	}()
+
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return resp, err
+	}
 
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
@@ -568,6 +575,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			log.Warnf("cursor ExecuteStream error: %v", err)
 		}
 	}()
+	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
+		return nil, err
+	}
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
 		return nil, fmt.Errorf("cursor: access token not found")

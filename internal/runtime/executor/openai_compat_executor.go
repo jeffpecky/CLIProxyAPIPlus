@@ -709,6 +709,19 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 		return cliproxyexecutor.Response{}, err
 	}
 
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://token-count.local", bytes.NewReader(translated))
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if errHook != nil {
+		return cliproxyexecutor.Response{}, errHook
+	}
+	if hookedBody != nil {
+		translated = hookedBody
+	}
+
 	enc, err := helps.TokenizerForModel(modelForCounting)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("openai compat executor: tokenizer init failed: %w", err)

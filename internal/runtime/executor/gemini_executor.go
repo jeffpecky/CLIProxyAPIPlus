@@ -184,6 +184,13 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -296,6 +303,13 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, true, req, opts)
+	if errHook != nil {
+		return nil, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -418,6 +432,13 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, targetName, sdktranslator.FromString("interactions"), false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -498,6 +519,13 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, targetName, sdktranslator.FromString("interactions"), true, req, opts)
+	if errHook != nil {
+		return nil, errHook
+	}
+	if hookedBody != nil {
+		body = hookedBody
+	}
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -655,6 +683,13 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, baseModel, to, false, req, opts)
+	if errHook != nil {
+		return cliproxyexecutor.Response{}, errHook
+	}
+	if hookedBody != nil {
+		translatedReq = hookedBody
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

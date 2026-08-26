@@ -156,15 +156,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	cchBilling := ""
-	if cchSigning {
-		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallback(bodyForUpstream) {
-			cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
-		}
-		bodyForUpstream, err = finalizeAnthropicMessagesBodyCCH(bodyForUpstream, cchBilling)
-		if err != nil {
-			return resp, fmt.Errorf("finalize Claude CCH: %w", err)
-		}
-	}
 	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
 	// Runs on the finished body: payload rules can rewrite model and messages
 	// long after translation, so an earlier check would not describe the request
@@ -191,6 +182,23 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		claudeSessionID,
 	); errHeaders != nil {
 		return resp, errHeaders
+	}
+	hookedBody, errHook := applyFinalHookBody(ctx, httpReq, upstreamModel, to, false, req, opts)
+	if errHook != nil {
+		return resp, errHook
+	}
+	if hookedBody != nil {
+		bodyForUpstream = hookedBody
+	}
+	if cchSigning {
+		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallback(bodyForUpstream) {
+			cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
+		}
+		bodyForUpstream, err = finalizeAnthropicMessagesBodyCCH(bodyForUpstream, cchBilling)
+		if err != nil {
+			return resp, fmt.Errorf("finalize Claude CCH: %w", err)
+		}
+		resetFinalRequestBody(httpReq, bodyForUpstream)
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
