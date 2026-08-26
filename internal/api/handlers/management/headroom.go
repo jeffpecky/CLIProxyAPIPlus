@@ -10,41 +10,71 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	headroomStartupTimeout = 30 * time.Second
+	headroomPollInterval   = 200 * time.Millisecond
+)
+
+type headroomStartKind int
+
+const (
+	headroomStartSpawn headroomStartKind = iota
+	headroomStartReuse
+	headroomStartConflict
+)
+
+type headroomStartDecision struct {
+	kind     headroomStartKind
+	managed  bool
+	ownerPID int
+}
+
 // managedHeadroom tracks the managed Headroom proxy process.
 type managedHeadroom struct {
-	pid int
+	pid      int
+	identity string
+}
+
+type headroomOwnership struct {
+	pid      int
+	identity string
 }
 
 var (
-	headroomMu      sync.Mutex
-	managedProcess  *managedHeadroom
-	headroomPIDPath = filepath.Join("headroom", "proxy.pid")
-	headroomLogPath = filepath.Join("headroom", "proxy.log")
+	headroomMu          sync.Mutex
+	headroomLifecycleMu sync.Mutex
+	managedProcess      *managedHeadroom
+	headroomPIDPath     = filepath.Join("headroom", "proxy.pid")
+	headroomLogPath     = filepath.Join("headroom", "proxy.log")
+	stopProcessTree     = stopHeadroomProcessTree
 )
 
-func readHeadroomPID() (int, bool) {
+func readHeadroomPID() (headroomOwnership, bool) {
 	data, err := os.ReadFile(headroomPIDPath)
 	if err != nil {
-		return 0, false
+		return headroomOwnership{}, false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0, false
+	parts := strings.Fields(string(data))
+	if len(parts) != 2 {
+		return headroomOwnership{}, false
 	}
-	return pid, true
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 || parts[1] == "" {
+		return headroomOwnership{}, false
+	}
+	return headroomOwnership{pid: pid, identity: parts[1]}, true
 }
 
-func writeHeadroomPID(pid int) error {
+func writeHeadroomPID(pid int, identity string) error {
 	if err := os.MkdirAll(filepath.Dir(headroomPIDPath), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(headroomPIDPath, []byte(strconv.Itoa(pid)), 0o600)
+	return os.WriteFile(headroomPIDPath, []byte(fmt.Sprintf("%d %s", pid, identity)), 0o600)
 }
 
 func clearHeadroomPID() {
@@ -70,39 +100,59 @@ func headroomHealthy(url string) bool {
 }
 
 func waitForHeadroomHealthy(url string, timeout, interval time.Duration, healthy func(string) bool) bool {
-	deadline := time.Now().Add(timeout)
+	return waitForHeadroomHealthyWithClock(url, timeout, interval, healthy, time.Now, time.Sleep)
+}
+
+func waitForHeadroomHealthyWithClock(
+	url string,
+	timeout time.Duration,
+	interval time.Duration,
+	healthy func(string) bool,
+	now func() time.Time,
+	sleep func(time.Duration),
+) bool {
+	deadline := now().Add(timeout)
 	for {
 		if healthy(url) {
 			return true
 		}
-		if time.Now().Add(interval).After(deadline) {
+		if now().Add(interval).After(deadline) {
 			return false
 		}
-		time.Sleep(interval)
+		sleep(interval)
 	}
 }
 
-func stopHeadroomPID(pid int) {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
+func classifyHeadroomStart(healthy bool, ownerPID int, managed bool) headroomStartDecision {
+	if healthy {
+		return headroomStartDecision{kind: headroomStartReuse, managed: managed, ownerPID: ownerPID}
 	}
-	_ = proc.Signal(syscall.SIGTERM)
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if !headroomProcessRunning(pid) {
-			return
-		}
+	if ownerPID > 0 {
+		return headroomStartDecision{kind: headroomStartConflict, ownerPID: ownerPID}
 	}
-	_ = proc.Kill()
+	return headroomStartDecision{kind: headroomStartSpawn}
 }
 
-func headroomProcessRunning(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+func headroomPortConflictMessage(port, ownerPID int) string {
+	if ownerPID > 0 {
+		return fmt.Sprintf("Port %d is already occupied by PID %d, but /health is not healthy.", port, ownerPID)
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return fmt.Sprintf("Port %d is already occupied, but /health is not healthy.", port)
+}
+
+func headroomOwnershipRunning(ownership headroomOwnership) bool {
+	identity, ok := headroomProcessIdentity(ownership.pid)
+	return ok && identity == ownership.identity
+}
+
+func stopHeadroomPID(ownership headroomOwnership) error {
+	if !headroomOwnershipRunning(ownership) {
+		return fmt.Errorf("PID %d no longer matches managed Headroom process", ownership.pid)
+	}
+	if !headroomManagedProcessRunning(ownership.pid) {
+		return fmt.Errorf("PID %d is not a Headroom process", ownership.pid)
+	}
+	return stopProcessTree(ownership.pid)
 }
 
 func headroomExtractPort(url string) int {
@@ -144,8 +194,8 @@ func (h *Handler) HeadroomStatus(c *gin.Context) {
 	}()
 	wg.Wait()
 
-	pid, hasPID := readHeadroomPID()
-	managed := hasPID && pid > 0 && headroomProcessRunning(pid)
+	ownership, hasPID := readHeadroomPID()
+	managed := hasPID && headroomOwnershipRunning(ownership)
 
 	c.JSON(http.StatusOK, gin.H{
 		"installed": installed,
@@ -208,6 +258,12 @@ func (h *Handler) HeadroomInstall(c *gin.Context) {
 
 // HeadroomStart starts the Headroom proxy process.
 func (h *Handler) HeadroomStart(c *gin.Context) {
+	headroomLifecycleMu.Lock()
+	defer headroomLifecycleMu.Unlock()
+	h.headroomStart(c)
+}
+
+func (h *Handler) headroomStart(c *gin.Context) {
 	h.mu.Lock()
 	cfg := h.cfg
 	h.mu.Unlock()
@@ -218,14 +274,33 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 	}
 	port := headroomExtractPort(url)
 
-	if headroomHealthy(url) {
-		pid, hasPID := readHeadroomPID()
-		managed := hasPID && pid > 0 && headroomProcessRunning(pid)
-		response := gin.H{"success": true, "managed": managed}
-		if managed {
-			response["pid"] = pid
+	healthy := headroomHealthy(url)
+	ownership, hasPID := readHeadroomPID()
+	managed := hasPID && headroomOwnershipRunning(ownership)
+	if !healthy && managed {
+		if err := stopHeadroomPID(ownership); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("failed to stop stale Headroom process tree: %v", err)})
+			return
+		}
+		clearHeadroomPID()
+		managed = false
+	}
+	ownerPID, occupied := headroomPortOwnerPID(port)
+	decision := classifyHeadroomStart(healthy, ownerPID, managed)
+	if decision.kind == headroomStartReuse {
+		response := gin.H{"success": true, "managed": decision.managed}
+		if decision.managed {
+			response["pid"] = ownership.pid
 		}
 		c.JSON(http.StatusOK, response)
+		return
+	}
+	if decision.kind == headroomStartConflict || occupied {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"error":   headroomPortConflictMessage(port, ownerPID),
+			"pid":     ownerPID,
+		})
 		return
 	}
 
@@ -237,8 +312,11 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		return
 	}
 
-	if pid, ok := readHeadroomPID(); ok && headroomProcessRunning(pid) {
-		stopHeadroomPID(pid)
+	if ownership, ok := readHeadroomPID(); ok && headroomOwnershipRunning(ownership) {
+		if err := stopHeadroomPID(ownership); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("failed to stop stale Headroom process tree: %v", err)})
+			return
+		}
 	}
 	clearHeadroomPID()
 
@@ -260,7 +338,7 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		})
 		return
 	}
-	logFile, err := os.OpenFile(headroomLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	logFile, err := os.OpenFile(headroomLogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -283,11 +361,27 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		return
 	}
 
-	pid := cmd.Process.Pid
-	_ = writeHeadroomPID(pid)
+	managedPID := cmd.Process.Pid
+	identity, ok := headroomProcessIdentity(managedPID)
+	if !ok {
+		_ = stopProcessTree(managedPID)
+		go func() { _ = cmd.Wait(); _ = logFile.Close() }()
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "failed to identify started Headroom process"})
+		return
+	}
+	if err := writeHeadroomPID(managedPID, identity); err != nil {
+		cleanupErr := stopProcessTree(managedPID)
+		go func() { _ = cmd.Wait(); _ = logFile.Close() }()
+		if cleanupErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("failed to persist Headroom process ownership: %v; cleanup failed: %v", err, cleanupErr)})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("failed to persist Headroom process ownership: %v", err)})
+		return
+	}
 
 	headroomMu.Lock()
-	managedProcess = &managedHeadroom{pid: pid}
+	managedProcess = &managedHeadroom{pid: managedPID, identity: identity}
 	headroomMu.Unlock()
 
 	exitCh := make(chan struct{})
@@ -295,87 +389,96 @@ func (h *Handler) HeadroomStart(c *gin.Context) {
 		_ = cmd.Wait()
 		logFile.Close()
 		headroomMu.Lock()
-		if managedProcess != nil && managedProcess.pid == pid {
+		if managedProcess != nil && managedProcess.pid == managedPID {
 			managedProcess = nil
+			clearHeadroomPID()
 		}
 		headroomMu.Unlock()
-		clearHeadroomPID()
 		close(exitCh)
 	}()
 
-	const startupTimeout = 8 * time.Second
-	select {
-	case <-time.After(100 * time.Millisecond):
-		if !waitForHeadroomHealthy(url, startupTimeout, 200*time.Millisecond, headroomHealthy) {
-			_ = cmd.Process.Kill()
-			clearHeadroomPID()
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"error":   "Headroom proxy started but did not become healthy — see headroom/proxy.log.",
-			})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"success": true, "pid": pid})
-	case <-exitCh:
+	ready, exited := waitForHeadroomStartup(c.Request.Context(), url, headroomStartupTimeout, headroomPollInterval, headroomHealthy, exitCh)
+	if exited {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   "Headroom proxy exited during startup — see headroom/proxy.log.",
 		})
+		return
+	}
+	if !ready {
+		if err := stopHeadroomPID(headroomOwnership{pid: managedPID, identity: identity}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("Headroom did not become healthy within 30s, and process-tree cleanup failed: %v. See headroom/proxy.log.", err)})
+			return
+		}
+		clearHeadroomPID()
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "Headroom did not become healthy within 30s. Process tree stopped. See headroom/proxy.log."})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "pid": managedPID})
+}
+
+func waitForHeadroomStartup(ctx context.Context, url string, timeout, interval time.Duration, healthy func(string) bool, exited <-chan struct{}) (bool, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-exited:
+			return false, true
+		default:
+		}
+		if healthy(url) {
+			select {
+			case <-exited:
+				return false, true
+			default:
+				return true, false
+			}
+		}
+		select {
+		case <-exited:
+			return false, true
+		case <-ctx.Done():
+			return false, false
+		case <-timer.C:
+			return false, false
+		case <-ticker.C:
+		}
 	}
 }
 
 // HeadroomStop stops the managed Headroom proxy process.
 func (h *Handler) HeadroomStop(c *gin.Context) {
-	pid, ok := readHeadroomPID()
-	if !ok || pid <= 0 {
+	headroomLifecycleMu.Lock()
+	defer headroomLifecycleMu.Unlock()
+	ownership, ok := readHeadroomPID()
+	if !ok {
 		c.JSON(http.StatusOK, gin.H{"success": true, "stopped": false})
 		return
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		clearHeadroomPID()
-		c.JSON(http.StatusOK, gin.H{"success": true, "stopped": false})
+	if err := stopHeadroomPID(ownership); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "stopped": false, "error": err.Error()})
 		return
 	}
-
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		clearHeadroomPID()
-		c.JSON(http.StatusOK, gin.H{"success": true, "stopped": false})
-		return
-	}
-
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if !headroomProcessRunning(pid) {
-			clearHeadroomPID()
-			c.JSON(http.StatusOK, gin.H{"success": true, "stopped": true})
-			return
-		}
-	}
-
-	_ = proc.Kill()
 	clearHeadroomPID()
 	c.JSON(http.StatusOK, gin.H{"success": true, "stopped": true})
 }
 
 // HeadroomRestart stops then starts the Headroom proxy process.
 func (h *Handler) HeadroomRestart(c *gin.Context) {
+	headroomLifecycleMu.Lock()
+	defer headroomLifecycleMu.Unlock()
 	// Stop existing process
-	if pid, ok := readHeadroomPID(); ok && pid > 0 {
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGTERM)
-			for i := 0; i < 30; i++ {
-				time.Sleep(100 * time.Millisecond)
-				if !headroomProcessRunning(pid) {
-					break
-				}
-			}
-			_ = proc.Kill()
+	if ownership, ok := readHeadroomPID(); ok {
+		if err := stopHeadroomPID(ownership); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"success": false, "error": err.Error()})
+			return
 		}
 		clearHeadroomPID()
 	}
 
 	// Start fresh — reuse HeadroomStart logic
-	h.HeadroomStart(c)
+	h.headroomStart(c)
 }
