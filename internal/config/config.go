@@ -163,6 +163,15 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// CloudflareKey defines Cloudflare Workers AI API key configurations.
+	CloudflareKey []CodexKey `yaml:"cloudflare-api-key" json:"cloudflare-api-key"`
+
+	// NVIDIAKey defines NVIDIA NIM API key configurations.
+	NVIDIAKey []CodexKey `yaml:"nvidia-api-key" json:"nvidia-api-key"`
+
+	// OpenRouterKey defines OpenRouter API key configurations.
+	OpenRouterKey []CodexKey `yaml:"openrouter-api-key" json:"openrouter-api-key"`
+
 	// AmpCode contains the fork-maintained Amp CLI routing and management configuration.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 

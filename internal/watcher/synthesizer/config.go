@@ -60,6 +60,12 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// Cloudflare API Keys
+	out = append(out, s.synthesizeCloudflareKeys(ctx)...)
+	// NVIDIA API Keys
+	out = append(out, s.synthesizeNVIDIAKeys(ctx)...)
+	// OpenRouter API Keys
+	out = append(out, s.synthesizeOpenRouterKeys(ctx)...)
 
 	return out, nil
 }
@@ -209,6 +215,32 @@ func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
 }
 
+// synthesizeCloudflareKeys creates Auth entries for Cloudflare API keys.
+func (s *ConfigSynthesizer) synthesizeCloudflareKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	for i := range ctx.Config.CloudflareKey {
+		u := strings.TrimSpace(ctx.Config.CloudflareKey[i].BaseURL)
+		if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			ctx.Config.CloudflareKey[i].BaseURL = fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/v1", u)
+		}
+	}
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.CloudflareKey, "cloudflare")
+}
+
+// synthesizeNVIDIAKeys creates Auth entries for NVIDIA API keys.
+func (s *ConfigSynthesizer) synthesizeNVIDIAKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.NVIDIAKey, "nvidia")
+}
+
+// synthesizeOpenRouterKeys creates Auth entries for OpenRouter API keys.
+func (s *ConfigSynthesizer) synthesizeOpenRouterKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.OpenRouterKey, "openrouter")
+}
+
+var defaultCodexStyleBaseURLs = map[string]string{
+	"nvidia":     "https://integrate.api.nvidia.com/v1",
+	"openrouter": "https://openrouter.ai/api/v1",
+}
+
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
 	cfg := ctx.Config
 	now := ctx.Now
@@ -223,6 +255,11 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		}
 		prefix := strings.TrimSpace(entry.Prefix)
 		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			if defURL, ok := defaultCodexStyleBaseURLs[provider]; ok {
+				baseURL = defURL
+			}
+		}
 		id, token := idGen.Next(provider+":apikey", key, baseURL)
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:%s[%s]", provider, token),
