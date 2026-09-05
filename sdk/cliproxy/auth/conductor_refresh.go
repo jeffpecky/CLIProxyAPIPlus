@@ -151,6 +151,12 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 
 	provider := strings.ToLower(a.Provider)
 	lead := ProviderRefreshLead(provider, a.Runtime)
+	maxAge := ProviderRefreshMaxAge(provider, a.Runtime)
+	if maxAge != nil {
+		if lastRefresh.IsZero() || now.Sub(lastRefresh) >= *maxAge {
+			return true
+		}
+	}
 	if lead == nil {
 		return false
 	}
@@ -161,9 +167,12 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		return expiry.Sub(now) <= *lead
 	}
 	if !lastRefresh.IsZero() {
+		if maxAge != nil {
+			return false
+		}
 		return now.Sub(lastRefresh) >= *lead
 	}
 	return true
@@ -478,6 +487,70 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		return auth, false
 	}
 	return refreshed, true
+}
+
+// EnsureFresh refreshes an auth only when its provider policy says it is due.
+func (m *Manager) EnsureFresh(ctx context.Context, id string) (*Auth, bool, error) {
+	if m == nil {
+		return nil, false, errors.New("auth manager is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, false, errors.New("auth id is empty")
+	}
+
+	m.mu.RLock()
+	current := m.auths[id]
+	if current == nil {
+		m.mu.RUnlock()
+		return nil, false, errors.New("auth not found")
+	}
+	snapshot := current.Clone()
+	shouldRefresh := m.shouldRefresh(current, time.Now())
+	failedAccessToken := authAccessToken(current)
+	m.mu.RUnlock()
+
+	if !shouldRefresh {
+		return snapshot, false, nil
+	}
+	updated, err := m.refreshAuthForRequest(ctx, id, failedAccessToken)
+	if err != nil {
+		return snapshot, false, err
+	}
+	return updated, authWasRefreshed(snapshot, updated), nil
+}
+
+// ForceRefresh refreshes an auth after an upstream rejected the supplied token.
+func (m *Manager) ForceRefresh(ctx context.Context, id, failedAccessToken string) (*Auth, bool, error) {
+	if m == nil {
+		return nil, false, errors.New("auth manager is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, false, errors.New("auth id is empty")
+	}
+
+	m.mu.RLock()
+	current := m.auths[id]
+	if current == nil {
+		m.mu.RUnlock()
+		return nil, false, errors.New("auth not found")
+	}
+	snapshot := current.Clone()
+	m.mu.RUnlock()
+
+	updated, err := m.refreshAuthForRequest(ctx, id, failedAccessToken)
+	if err != nil {
+		return snapshot, false, err
+	}
+	return updated, authWasRefreshed(snapshot, updated), nil
+}
+
+func authWasRefreshed(before, after *Auth) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	return authAccessToken(before) != authAccessToken(after) || after.LastRefreshedAt.After(before.LastRefreshedAt)
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {

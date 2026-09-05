@@ -8,6 +8,9 @@ import (
 
 func init() {
 	registerRefreshLead("codex", func() Authenticator { return NewCodexAuthenticator() })
+	cliproxyauth.RegisterRefreshMaxAgeProvider("codex", func() *time.Duration {
+		return NewCodexAuthenticator().RefreshMaxAge()
+	})
 	registerRefreshLead("claude", func() Authenticator { return NewClaudeAuthenticator() })
 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })

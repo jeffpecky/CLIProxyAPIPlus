@@ -106,6 +106,24 @@ func (s *Service) Run(ctx context.Context) error {
 		if registry.GetOpenCodeModelsFromRemote() != nil {
 			refreshOpenCodeAuths()
 		}
+
+		// Register post-fetch hook for API-key provider models (NVIDIA, OpenRouter, Cloudflare):
+		// after async fetch completes, re-register models for all matching auths so the
+		// scheduler picks them up and model routing can resolve the provider.
+		refreshAPIKeyProviderAuths := func() {
+			apiKeyProviders := map[string]bool{
+				"nvidia":     true,
+				"openrouter": true,
+				"cloudflare": true,
+			}
+			for _, auth := range s.coreManager.List() {
+				if auth != nil && !auth.Disabled && apiKeyProviders[auth.Provider] {
+					s.registerModelsForAuth(ctx, auth)
+					s.coreManager.RefreshSchedulerEntry(auth.ID)
+				}
+			}
+		}
+		registry.SetAPIKeyModelsPostFetchHook(refreshAPIKeyProviderAuths)
 	}
 
 	if !homeEnabled {
@@ -221,12 +239,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.registerModelRefreshCallback()
 
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil && !homeEnabled {
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(context.Background(), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
 
 	select {
 	case <-ctx.Done():

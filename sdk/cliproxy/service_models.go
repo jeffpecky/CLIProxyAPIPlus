@@ -170,6 +170,33 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "opencode":
 		models = applyExcludedModels(registry.GetOpenCodeModelsFromRemote(), excluded)
+	case "nvidia":
+		models = registry.GetAPIKeyProviderModels("nvidia")
+		if entry := s.resolveConfigNvidiaKey(a); entry != nil {
+			excluded = entry.ExcludedModels
+			if len(entry.Models) > 0 {
+				models = buildConfigModels(entry.Models, "nvidia", "openai")
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "cloudflare":
+		models = registry.GetAPIKeyProviderModels("cloudflare")
+		if entry := s.resolveConfigCloudflareKey(a); entry != nil {
+			excluded = entry.ExcludedModels
+			if len(entry.Models) > 0 {
+				models = buildConfigModels(entry.Models, "cloudflare", "openai")
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "openrouter":
+		models = registry.GetAPIKeyProviderModels("openrouter")
+		if entry := s.resolveConfigOpenRouterKey(a); entry != nil {
+			excluded = entry.ExcludedModels
+			if len(entry.Models) > 0 {
+				models = buildConfigModels(entry.Models, "openrouter", "openai")
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -505,6 +532,27 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.CodexKey, true)
+}
+
+func (s *Service) resolveConfigNvidiaKey(auth *coreauth.Auth) *config.CodexKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.NVIDIAKey, false)
+}
+
+func (s *Service) resolveConfigCloudflareKey(auth *coreauth.Auth) *config.CodexKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.CloudflareKey, false)
+}
+
+func (s *Service) resolveConfigOpenRouterKey(auth *coreauth.Auth) *config.CodexKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.OpenRouterKey, false)
 }
 
 func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {

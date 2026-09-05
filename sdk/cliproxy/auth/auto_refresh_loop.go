@@ -393,24 +393,37 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 
 	provider := strings.ToLower(auth.Provider)
 	lead := ProviderRefreshLead(provider, auth.Runtime)
-	if lead == nil {
+	maxAge := ProviderRefreshMaxAge(provider, auth.Runtime)
+	candidates := make([]time.Time, 0, 2)
+
+	if maxAge != nil {
+		if lastRefresh.IsZero() {
+			return now, true
+		}
+		candidates = append(candidates, lastRefresh.Add(*maxAge))
+	}
+	if lead != nil && hasExpiry && !expiry.IsZero() {
+		candidates = append(candidates, expiry.Add(-*lead))
+	} else if lead != nil && maxAge == nil && !lastRefresh.IsZero() {
+		candidates = append(candidates, lastRefresh.Add(*lead))
+	}
+	if len(candidates) == 0 {
+		if lead != nil {
+			return now, true
+		}
 		return time.Time{}, false
 	}
-	if hasExpiry && !expiry.IsZero() {
-		dueAt := expiry.Add(-*lead)
-		if !dueAt.After(now) {
-			return now, true
+
+	dueAt := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.Before(dueAt) {
+			dueAt = candidate
 		}
-		return dueAt, true
 	}
-	if !lastRefresh.IsZero() {
-		dueAt := lastRefresh.Add(*lead)
-		if !dueAt.After(now) {
-			return now, true
-		}
-		return dueAt, true
+	if !dueAt.After(now) {
+		return now, true
 	}
-	return now, true
+	return dueAt, true
 }
 
 type refreshHeapItem struct {

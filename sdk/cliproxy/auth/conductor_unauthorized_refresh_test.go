@@ -90,6 +90,11 @@ func (e *unauthorizedRefreshExecutor) HttpRequest(context.Context, *Auth, *http.
 	return nil, nil
 }
 
+func (e *unauthorizedRefreshExecutor) PrepareRequest(req *http.Request, auth *Auth) error {
+	req.Header.Set("Authorization", "Bearer "+authAccessToken(auth))
+	return nil
+}
+
 func (e *unauthorizedRefreshExecutor) ExecuteCalls() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -163,6 +168,45 @@ func newUnauthorizedRefreshFixture(t *testing.T, refreshFail bool) (*Manager, *u
 	}
 
 	return m, executor, primary, backup, model
+}
+
+func TestManager_DueCredentialIsNotRefreshedBeforeRequest(t *testing.T) {
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+	primary.Metadata["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), primary); errUpdate != nil {
+		t.Fatalf("update primary: %v", errUpdate)
+	}
+	executor.mu.Lock()
+	delete(executor.tokenInvalid, "stale-access-token")
+	executor.mu.Unlock()
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v", errExecute)
+	}
+	if got := string(resp.Payload); got != primary.ID+":stale-access-token" {
+		t.Fatalf("payload = %q, want current credential response", got)
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("NewRequest error = %v", errRequest)
+	}
+	if errInject := m.InjectCredentials(req, primary.ID); errInject != nil {
+		t.Fatalf("InjectCredentials error = %v", errInject)
+	}
+	if errPrepare := m.PrepareHttpRequest(context.Background(), primary, req); errPrepare != nil {
+		t.Fatalf("PrepareHttpRequest error = %v", errPrepare)
+	}
+	if _, errHTTP := m.HttpRequest(context.Background(), primary, req); errHTTP != nil {
+		t.Fatalf("HttpRequest error = %v", errHTTP)
+	}
+	if got := executor.RefreshCalls(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0 before provider rejection", got)
+	}
+	if got := executor.ExecuteCalls(); len(got) != 1 || got[0] != primary.ID {
+		t.Fatalf("Execute calls = %v, want [primary]", got)
+	}
 }
 
 func TestManager_Execute_UnauthorizedRefreshesCurrentAuthBeforeFallback(t *testing.T) {

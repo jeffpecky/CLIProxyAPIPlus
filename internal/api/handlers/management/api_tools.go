@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -170,111 +171,119 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	headerTemplate := cloneStringMap(body.Header)
 
-	reqHeaders := body.Header
-	if reqHeaders == nil {
-		reqHeaders = map[string]string{}
+	type callResult struct {
+		statusCode int
+		header     http.Header
+		body       []byte
+		auth       *coreauth.Auth
+		token      string
+		headers    map[string]string
 	}
 
-	var hostOverride string
-	var token string
-	var tokenResolved bool
-	var tokenErr error
-	for key, value := range reqHeaders {
-		if !strings.Contains(value, "$TOKEN$") {
-			continue
-		}
-		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth, requestProxyURL)
-			tokenResolved = true
-		}
-		if auth != nil && token == "" {
-			if tokenErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-				return
+	doCall := func(forceRefresh bool, failedAccessToken string) (*callResult, error) {
+		selectedAuth := auth
+		token := ""
+		var errToken error
+		if mapContainsValue(headerTemplate, "$TOKEN$") {
+			selectedAuth, token, errToken = h.resolveTokenForAuth(c.Request.Context(), selectedAuth, requestProxyURL, forceRefresh, failedAccessToken)
+			if selectedAuth != nil && token == "" {
+				if errToken != nil {
+					return nil, fmt.Errorf("auth token refresh failed: %w", errToken)
+				}
+				return nil, errors.New("auth token not found")
 			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
-			return
 		}
-		if token == "" {
-			continue
-		}
-		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
-	}
 
-	// When caller indicates CBOR in request headers, convert JSON string payload to CBOR bytes.
-	useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
-
-	var requestBody io.Reader
-	if body.Data != "" {
-		if useCBORPayload {
-			cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
-			if errEncode != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json data for cbor content-type"})
-				return
+		reqHeaders := cloneStringMap(headerTemplate)
+		for key, value := range reqHeaders {
+			if token != "" {
+				reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 			}
-			requestBody = bytes.NewReader(cborPayload)
-		} else {
-			requestBody = strings.NewReader(body.Data)
 		}
-	}
+		useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
 
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
-	if errNewRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
-		return
-	}
-
-	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
+		var requestBody io.Reader
+		if body.Data != "" {
+			if useCBORPayload {
+				cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
+				if errEncode != nil {
+					return nil, fmt.Errorf("invalid json data for cbor content-type: %w", errEncode)
+				}
+				requestBody = bytes.NewReader(cborPayload)
+			} else {
+				requestBody = strings.NewReader(body.Data)
+			}
 		}
-		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
+
+		req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+		if errNewRequest != nil {
+			return nil, fmt.Errorf("failed to build request: %w", errNewRequest)
+		}
+		for key, value := range reqHeaders {
+			if strings.EqualFold(key, "host") {
+				req.Host = strings.TrimSpace(value)
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+
+		httpClient := &http.Client{Timeout: defaultAPICallTimeout}
+		httpClient.Transport = h.apiCallTransport(selectedAuth, requestProxyURL)
+		resp, errDo := httpClient.Do(req)
+		if errDo != nil {
+			return nil, errDo
+		}
+		respBody, errReadAll := io.ReadAll(resp.Body)
+		errClose := resp.Body.Close()
+		if errReadAll != nil {
+			return nil, errReadAll
+		}
+		if errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+		return &callResult{
+			statusCode: resp.StatusCode,
+			header:     resp.Header,
+			body:       respBody,
+			auth:       selectedAuth,
+			token:      token,
+			headers:    reqHeaders,
+		}, nil
 	}
 
-	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
-	}
-	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		log.WithError(errDo).Debug("management APICall request failed")
+	result, errCall := doCall(false, "")
+	if errCall != nil {
+		log.WithError(errCall).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
+	if result.auth != nil && result.token != "" && (result.statusCode == http.StatusUnauthorized || result.statusCode == http.StatusForbidden) {
+		if retried, errRetry := doCall(true, result.token); errRetry == nil {
+			result = retried
+		} else {
+			log.WithError(errRetry).Debug("management APICall auth refresh retry failed")
 		}
-	}()
-
-	respBody, errReadAll := io.ReadAll(resp.Body)
-	if errReadAll != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
-		return
 	}
 
 	// For CBOR upstream responses, decode into plain text or JSON string before returning.
-	responseBodyText := string(respBody)
-	if headerContainsValue(reqHeaders, "Accept", "application/cbor") || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/cbor") {
-		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(respBody); errDecode == nil {
+	responseBodyText := string(result.body)
+	if headerContainsValue(result.headers, "Accept", "application/cbor") || strings.Contains(strings.ToLower(result.header.Get("Content-Type")), "application/cbor") {
+		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(result.body); errDecode == nil {
 			responseBodyText = decodedBody
 		}
 	}
 
+	auth = result.auth
 	response := apiCallResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header,
+		StatusCode: result.statusCode,
+		Header:     result.header,
 		Body:       responseBodyText,
 	}
 
 	// If this is a GitHub Copilot token endpoint response, try to enrich with quota information
-	if resp.StatusCode == http.StatusOK &&
+	if result.statusCode == http.StatusOK &&
 		strings.Contains(urlStr, "copilot_internal") &&
 		strings.Contains(urlStr, "/token") {
 		response = h.enrichCopilotTokenResponse(c.Request.Context(), response, auth, urlStr)
@@ -291,6 +300,23 @@ func (h *Handler) APICall(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, response)
 	}
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func mapContainsValue(values map[string]string, needle string) bool {
+	for _, value := range values {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -320,20 +346,40 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 	return ""
 }
 
-func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, requestProxyURL string, forceRefresh bool, failedAccessToken string) (*coreauth.Auth, string, error) {
 	if auth == nil {
-		return "", nil
+		return nil, "", nil
 	}
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
-		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth, requestProxyURL)
-		return token, errToken
+		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth, requestProxyURL, forceRefresh)
+		return auth, token, errToken
 	}
 
-	return tokenValueForAuth(auth), nil
+	if h != nil && h.authManager != nil && auth.ID != "" {
+		var updated *coreauth.Auth
+		var errRefresh error
+		if forceRefresh {
+			updated, _, errRefresh = h.authManager.ForceRefresh(ctx, auth.ID, failedAccessToken)
+		} else {
+			updated, _, errRefresh = h.authManager.EnsureFresh(ctx, auth.ID)
+		}
+		if errRefresh != nil {
+			currentToken := tokenValueForAuth(auth)
+			if !forceRefresh && currentToken != "" {
+				return auth, currentToken, nil
+			}
+			return auth, "", errRefresh
+		}
+		if updated != nil {
+			auth = updated
+		}
+	}
+
+	return auth, tokenValueForAuth(auth), nil
 }
 
-func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string, forceRefresh bool) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -347,7 +393,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	}
 
 	current := strings.TrimSpace(tokenValueFromMetadata(metadata))
-	if current != "" && !antigravityTokenNeedsRefresh(metadata) {
+	if current != "" && !forceRefresh && !antigravityTokenNeedsRefresh(metadata) {
 		return current, nil
 	}
 
@@ -985,7 +1031,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, "")
+	updatedAuth, token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, "", false, "")
 	if tokenErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to refresh copilot token"})
 		return
@@ -993,6 +1039,9 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	if token == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "copilot token not found"})
 		return
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
 	}
 
 	apiURL := "https://api.github.com/copilot_internal/user"
@@ -1095,7 +1144,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	// Get the GitHub token to call the copilot_internal/user endpoint
-	token, tokenErr := h.resolveTokenForAuth(ctx, auth, "")
+	_, token, tokenErr := h.resolveTokenForAuth(ctx, auth, "", false, "")
 	if tokenErr != nil {
 		log.WithError(tokenErr).Debug("enrichCopilotTokenResponse: failed to resolve token")
 		return response

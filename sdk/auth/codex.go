@@ -35,6 +35,10 @@ func (a *CodexAuthenticator) RefreshLead() *time.Duration {
 	return new(5 * 24 * time.Hour)
 }
 
+func (a *CodexAuthenticator) RefreshMaxAge() *time.Duration {
+	return new(8 * 24 * time.Hour)
+}
+
 func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")

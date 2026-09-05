@@ -897,7 +897,7 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -971,7 +971,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg)
 			if cfg.AuthDir != "" {
 				kiro.InitRateLimiterConfig(cfg)
 				kiro.InitSystemPromptInjectConfig(cfg)
@@ -996,7 +996,7 @@ func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCo
 	return !homeEnabled, true
 }
 
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
+func startModelCatalogUpdaters(localModel, homeEnabled bool, cfg *config.Config) {
 	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
@@ -1005,6 +1005,21 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 		registry.StartModelsUpdater(context.Background())
 		registry.SetOpenCodeModelsEnabled(true)
 		registry.StartOpenCodeModelsUpdater(context.Background())
+	}
+
+	// Start API-key provider model fetchers (NVIDIA, OpenRouter)
+	if cfg != nil {
+		registry.SetAPIKeyModelsEnabled(true)
+		var nvidiaKeys, openrouterKeys []registry.APIKeyEntry
+		for _, k := range cfg.NVIDIAKey {
+			nvidiaKeys = append(nvidiaKeys, registry.APIKeyEntry{APIKey: k.APIKey})
+		}
+		for _, k := range cfg.OpenRouterKey {
+			openrouterKeys = append(openrouterKeys, registry.APIKeyEntry{APIKey: k.APIKey})
+		}
+		if len(nvidiaKeys) > 0 || len(openrouterKeys) > 0 {
+			registry.StartAPIKeyModelsUpdater(context.Background(), nvidiaKeys, nil, openrouterKeys)
+		}
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}

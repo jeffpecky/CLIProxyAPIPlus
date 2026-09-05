@@ -35,6 +35,12 @@ func (a *OpenCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		Status:     coreauth.StatusActive,
 		CreatedAt:  now,
 		UpdatedAt:  now,
+		Attributes: map[string]string{
+			"header:Authorization":      "Bearer public",
+			"header:User-Agent":         "opencode",
+			"header:x-opencode-client":  "desktop",
+			"header:x-opencode-project": "global",
+		},
 		Metadata: map[string]any{
 			"email": "opencode-free",
 			"type":  "free",

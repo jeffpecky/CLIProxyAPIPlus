@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -15,13 +16,18 @@ import (
 const homeUnauthorizedRefreshProvider = "home-unauthorized-refresh"
 
 type homeUnauthorizedRefreshDispatcher struct {
-	calls atomic.Int32
+	calls     atomic.Int32
+	expiresAt string
 }
 
 func (*homeUnauthorizedRefreshDispatcher) HeartbeatOK() bool { return true }
 
 func (d *homeUnauthorizedRefreshDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
+	metadata := map[string]any{"access_token": "stale-access-token"}
+	if d.expiresAt != "" {
+		metadata["expires_at"] = d.expiresAt
+	}
 	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
 		ID:       "home-refresh-auth",
 		Provider: homeUnauthorizedRefreshProvider,
@@ -30,9 +36,7 @@ func (d *homeUnauthorizedRefreshDispatcher) RPopAuth(context.Context, string, st
 			AttributeAuthKind: AuthKindOAuth,
 			"websockets":      "true",
 		},
-		Metadata: map[string]any{
-			"access_token": "stale-access-token",
-		},
+		Metadata: metadata,
 	}})
 }
 
@@ -42,6 +46,7 @@ type homeUnauthorizedRefreshExecutor struct {
 	streamMode      string
 	refreshErr      error
 	keepStale       bool
+	acceptStale     bool
 	retainSelection bool
 	executeCalls    atomic.Int32
 	countCalls      atomic.Int32
@@ -58,7 +63,7 @@ func (e *homeUnauthorizedRefreshExecutor) Execute(_ context.Context, auth *Auth,
 			lifecycle.Retain()
 		}
 	}
-	if authAccessToken(auth) == "stale-access-token" {
+	if authAccessToken(auth) == "stale-access-token" && !e.acceptStale {
 		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired access token"}
 	}
 	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
@@ -123,6 +128,22 @@ func newHomeUnauthorizedRefreshManager(dispatcher *homeUnauthorizedRefreshDispat
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	manager.RegisterExecutor(executor)
 	return manager
+}
+
+func TestHomeDueCredentialIsNotRefreshedBeforeRequest(t *testing.T) {
+	dispatcher := &homeUnauthorizedRefreshDispatcher{expiresAt: time.Now().Add(time.Minute).Format(time.RFC3339)}
+	executor := &homeUnauthorizedRefreshExecutor{acceptStale: true}
+	manager := newHomeUnauthorizedRefreshManager(dispatcher, executor)
+
+	if _, errExecute := manager.Execute(context.Background(), []string{homeUnauthorizedRefreshProvider}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("refresh calls = %d, want 0 for due-but-valid Home credential", got)
+	}
+	if got := executor.executeCalls.Load(); got != 1 {
+		t.Fatalf("execute calls = %d, want 1", got)
+	}
 }
 
 func TestHomeUnauthorizedRefreshesSameSelectionBeforeRedispatch(t *testing.T) {

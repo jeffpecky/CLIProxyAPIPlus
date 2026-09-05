@@ -627,8 +627,10 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 }
 
 var (
-	refreshLeadMu        sync.RWMutex
-	refreshLeadFactories = make(map[string]func() *time.Duration)
+	refreshLeadMu             sync.RWMutex
+	refreshLeadFactories      = make(map[string]func() *time.Duration)
+	refreshMaxAgeMu           sync.RWMutex
+	refreshMaxAgeFactories    = make(map[string]func() *time.Duration)
 )
 
 func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration) {
@@ -639,6 +641,16 @@ func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration)
 	refreshLeadMu.Lock()
 	refreshLeadFactories[provider] = factory
 	refreshLeadMu.Unlock()
+}
+
+func RegisterRefreshMaxAgeProvider(provider string, factory func() *time.Duration) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" || factory == nil {
+		return
+	}
+	refreshMaxAgeMu.Lock()
+	refreshMaxAgeFactories[provider] = factory
+	refreshMaxAgeMu.Unlock()
 }
 
 var expireKeys = [...]string{"expired", "expire", "expires_at", "expiresAt", "expiry", "expires"}
@@ -692,6 +704,27 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 	}
 	if lead := factory(); lead != nil && *lead > 0 {
 		return lead
+	}
+	return nil
+}
+
+func ProviderRefreshMaxAge(provider string, runtime any) *time.Duration {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if runtime != nil {
+		if eval, ok := runtime.(interface{ RefreshMaxAge() *time.Duration }); ok {
+			if maxAge := eval.RefreshMaxAge(); maxAge != nil && *maxAge > 0 {
+				return maxAge
+			}
+		}
+	}
+	refreshMaxAgeMu.RLock()
+	factory := refreshMaxAgeFactories[provider]
+	refreshMaxAgeMu.RUnlock()
+	if factory == nil {
+		return nil
+	}
+	if maxAge := factory(); maxAge != nil && *maxAge > 0 {
+		return maxAge
 	}
 	return nil
 }

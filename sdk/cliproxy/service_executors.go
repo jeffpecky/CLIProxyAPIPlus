@@ -312,13 +312,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "qoder":
 		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(cfg))
 	case "opencode":
-		// OpenCode is a noAuth provider: hardcode base_url
-		// so the OpenAI-compat executor can route requests to opencode.ai.
-		if a.Attributes == nil {
-			a.Attributes = make(map[string]string)
-		}
-		a.Attributes["base_url"] = "https://opencode.ai/zen/v1"
-		s.registerOpenAICompatProviderExecutor("opencode", a, cfg, forceReplace, false)
+		// OpenCode has a dedicated executor with custom headers and session management
+		s.coreManager.RegisterExecutor(executor.NewOpenCodeExecutor(cfg))
 	case "xai":
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("xai")
