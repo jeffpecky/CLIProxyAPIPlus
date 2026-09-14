@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,12 @@ import (
 const (
 	headroomStartupTimeout = 30 * time.Second
 	headroomPollInterval   = 200 * time.Millisecond
+	headroomLogTailLines   = 20
+)
+
+var (
+	headroomLogURLPattern    = regexp.MustCompile(`https?://[^\s]+`)
+	headroomLogSecretPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|token|secret|password)=\S+`)
 )
 
 type headroomStartKind int
@@ -97,6 +105,47 @@ func headroomHealthy(url string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func headroomStartupLogTail() string {
+	data, err := os.ReadFile(headroomLogPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) > headroomLogTailLines {
+		lines = lines[len(lines)-headroomLogTailLines:]
+	}
+	tail := strings.Join(lines, "\n")
+	tail = headroomLogURLPattern.ReplaceAllStringFunc(tail, func(value string) string {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return value
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	})
+	return headroomLogSecretPattern.ReplaceAllString(tail, "$1=[REDACTED]")
+}
+
+func headroomStartupFailure(stage, message string, exitCode *int) gin.H {
+	payload := gin.H{
+		"success":  false,
+		"code":     "HEADROOM_STARTUP_FAILED",
+		"stage":    stage,
+		"error":    message,
+		"hint":     "Run `headroom doctor`, then repair or update Headroom and retry.",
+		"log_path": headroomLogPath,
+	}
+	if logTail := headroomStartupLogTail(); logTail != "" {
+		payload["log_tail"] = logTail
+	}
+	if exitCode != nil {
+		payload["exit_code"] = *exitCode
+	}
+	return payload
 }
 
 func waitForHeadroomHealthy(url string, timeout, interval time.Duration, healthy func(string) bool) bool {
@@ -384,9 +433,9 @@ func (h *Handler) headroomStart(c *gin.Context) {
 	managedProcess = &managedHeadroom{pid: managedPID, identity: identity}
 	headroomMu.Unlock()
 
-	exitCh := make(chan struct{})
+	exitCh := make(chan int, 1)
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
 		logFile.Close()
 		headroomMu.Lock()
 		if managedProcess != nil && managedProcess.pid == managedPID {
@@ -394,55 +443,60 @@ func (h *Handler) headroomStart(c *gin.Context) {
 			clearHeadroomPID()
 		}
 		headroomMu.Unlock()
+		exitCode := 0
+		if err != nil {
+			exitCode = -1
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			}
+		}
+		exitCh <- exitCode
 		close(exitCh)
 	}()
 
-	ready, exited := waitForHeadroomStartup(c.Request.Context(), url, headroomStartupTimeout, headroomPollInterval, headroomHealthy, exitCh)
-	if exited {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error":   "Headroom proxy exited during startup — see headroom/proxy.log.",
-		})
+	ready, exitCode := waitForHeadroomStartup(c.Request.Context(), url, headroomStartupTimeout, headroomPollInterval, headroomHealthy, exitCh)
+	if exitCode != nil {
+		c.JSON(http.StatusInternalServerError, headroomStartupFailure("process_exited", "Headroom proxy exited during startup.", exitCode))
 		return
 	}
 	if !ready {
 		if err := stopHeadroomPID(headroomOwnership{pid: managedPID, identity: identity}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": fmt.Sprintf("Headroom did not become healthy within 30s, and process-tree cleanup failed: %v. See headroom/proxy.log.", err)})
+			c.JSON(http.StatusInternalServerError, headroomStartupFailure("cleanup_failed", fmt.Sprintf("Headroom did not become healthy within 30s, and process-tree cleanup failed: %v", err), nil))
 			return
 		}
 		clearHeadroomPID()
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "Headroom did not become healthy within 30s. Process tree stopped. See headroom/proxy.log."})
+		c.JSON(http.StatusInternalServerError, headroomStartupFailure("readiness_timeout", "Headroom did not become healthy within 30s. Process tree stopped.", nil))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "pid": managedPID})
 }
 
-func waitForHeadroomStartup(ctx context.Context, url string, timeout, interval time.Duration, healthy func(string) bool, exited <-chan struct{}) (bool, bool) {
+func waitForHeadroomStartup(ctx context.Context, url string, timeout, interval time.Duration, healthy func(string) bool, exited <-chan int) (bool, *int) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-exited:
-			return false, true
+		case exitCode := <-exited:
+			return false, &exitCode
 		default:
 		}
 		if healthy(url) {
 			select {
-			case <-exited:
-				return false, true
+			case exitCode := <-exited:
+				return false, &exitCode
 			default:
-				return true, false
+				return true, nil
 			}
 		}
 		select {
-		case <-exited:
-			return false, true
+		case exitCode := <-exited:
+			return false, &exitCode
 		case <-ctx.Done():
-			return false, false
+			return false, nil
 		case <-timer.C:
-			return false, false
+			return false, nil
 		case <-ticker.C:
 		}
 	}
