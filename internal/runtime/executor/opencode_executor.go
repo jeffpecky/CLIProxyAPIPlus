@@ -119,7 +119,7 @@ func openCodeNormalizeSession(value string) string {
 // openCodeIsValidSessionFormat checks if a session matches canonical format:
 // ses_ + 12 hex + 14 base62 = 30 chars total.
 func openCodeIsValidSessionFormat(s string) bool {
-	if len(s) != 32 || !strings.HasPrefix(s, "ses_") { // 4 prefix + 12 hex + 14 base62 = 30
+	if len(s) != 30 || !strings.HasPrefix(s, "ses_") {
 		return false
 	}
 	hexPart := s[4:16]
