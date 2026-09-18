@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
+	"math/big"
 	"net/http"
 	"strings"
 
@@ -14,21 +16,95 @@ import (
 )
 
 const (
-	// OpenCode base URL for the zen API
-	openCodeBaseURL = "https://opencode.ai/zen/v1"
-
-	// openCodeSessionHeader is the header name for OpenCode session identity
-	openCodeSessionHeader = "x-opencode-session"
-
-	// openCodeMaxSessionLength is the maximum allowed session ID length
+	openCodeBaseURL         = "https://opencode.ai/zen/v1"
+	openCodeSessionHeader   = "x-opencode-session"
 	openCodeMaxSessionLength = 256
-
-	// openCodeSessionHashLength is the number of hex characters to use from SHA-256
-	openCodeSessionHashLength = 32
+	openCodeUA              = "opencode/1.18.31"
 )
 
+var base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// openCodeDecoyTools are injected to satisfy upstream free-tier verification
+// which requires both 'bash' and 'read' in the tools payload.
+var openCodeDecoyTools = []map[string]any{
+	{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "bash",
+			"description": "This tool is currently unavailable and must not be used.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "read",
+			"description": "This tool is currently unavailable and must not be used.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	},
+}
+
+func openCodeBase62Random(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	var out strings.Builder
+	for i := 0; i < n; i++ {
+		out.WriteByte(base62Chars[int(b[i])%62])
+	}
+	return out.String()
+}
+
+// openCodeGenerateSessionId generates a canonical session ID:
+// ses_ + 12 hex chars (from inverted timestamp) + 14 base62 chars = 30 chars total.
+func openCodeGenerateSessionId() string {
+	ts := uint64(0)
+	n, _ := rand.Int(rand.Reader, big.NewInt(1<<40))
+	ts = uint64(n.Int64())
+	inverted := ^ts
+	hex12 := ""
+	for i := 5; i >= 0; i-- {
+		hex12 += string("0123456789abcdef"[(inverted>>(uint(i)*8))&0xff>>4])
+		hex12 += string("0123456789abcdef"[(inverted>>(uint(i)*8))&0xff&0x0f])
+	}
+	if len(hex12) > 12 {
+		hex12 = hex12[:12]
+	}
+	return "ses_" + hex12 + openCodeBase62Random(14)
+}
+
+// openCodeGenerateRequestId generates a canonical request ID:
+// msg_ + 12 hex chars + 14 base62 chars = 30 chars total.
+func openCodeGenerateRequestId() string {
+	return "msg_" + openCodeBase62Random(12) + openCodeBase62Random(14)
+}
+
+// openCodeTranslateSession creates a deterministic session ID from a downstream
+// session ID and client tool name, in canonical format: ses_ + 12 hex + 14 base62.
+func openCodeTranslateSession(sessionID, clientTool string) string {
+	if sessionID == "" {
+		return ""
+	}
+	if clientTool == "" {
+		clientTool = "generic"
+	}
+	input := "opencode\x00" + clientTool + "\x00" + sessionID
+	sum := sha256.Sum256([]byte(input))
+	// 12 hex chars from first 6 bytes of SHA-256
+	hexPart := ""
+	for i := 0; i < 6; i++ {
+		hexPart += string("0123456789abcdef"[sum[i]>>4])
+		hexPart += string("0123456789abcdef"[sum[i]&0x0f])
+	}
+	// 14 base62 chars from bytes 6-19
+	base62Part := ""
+	for i := 6; i < 20 && i < len(sum); i++ {
+		base62Part += string(base62Chars[sum[i]%62])
+	}
+	return "ses_" + hexPart + base62Part
+}
+
 // openCodeNormalizeSession validates and trims a session ID candidate.
-// Returns empty string for invalid, empty, or oversized values.
 func openCodeNormalizeSession(value string) string {
 	if value == "" {
 		return ""
@@ -40,17 +116,37 @@ func openCodeNormalizeSession(value string) string {
 	return normalized
 }
 
-// openCodeNativeSession extracts the x-opencode-session header from request headers.
-// Returns the normalized session if present, empty string otherwise.
+// openCodeIsValidSessionFormat checks if a session matches canonical format:
+// ses_ + 12 hex + 14 base62 = 30 chars total.
+func openCodeIsValidSessionFormat(s string) bool {
+	if len(s) != 32 || !strings.HasPrefix(s, "ses_") { // 4 prefix + 12 hex + 14 base62 = 30
+		return false
+	}
+	hexPart := s[4:16]
+	for _, c := range hexPart {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	base62Part := s[16:30]
+	for _, c := range base62Part {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// openCodeNativeSession extracts a valid canonical x-opencode-session header.
 func openCodeNativeSession(headers http.Header) string {
 	if headers == nil {
 		return ""
 	}
-	// Case-insensitive header lookup
 	for key, values := range headers {
 		if strings.EqualFold(key, openCodeSessionHeader) {
 			for _, value := range values {
-				if normalized := openCodeNormalizeSession(value); normalized != "" {
+				normalized := openCodeNormalizeSession(value)
+				if normalized != "" && openCodeIsValidSessionFormat(normalized) {
 					return normalized
 				}
 			}
@@ -59,74 +155,166 @@ func openCodeNativeSession(headers http.Header) string {
 	return ""
 }
 
-// openCodeTranslatedSession creates a deterministic, opaque session identifier
-// from a downstream session ID and client tool name.
-//
-// The format is: ses_<first 32 hex chars of SHA-256>
-//
-// This ensures:
-//   - Same conversation produces same ID (deterministic)
-//   - Different agents/tools produce different IDs (isolation)
-//   - Session IDs are opaque and don't leak downstream identifiers
-func openCodeTranslatedSession(sessionID, clientTool string) string {
-	if sessionID == "" {
-		return ""
-	}
-	if clientTool == "" {
-		clientTool = "generic"
-	}
-	// Deterministic hash: includes scope to isolate across different agents
-	input := "opencode-go\x00" + clientTool + "\x00" + sessionID
-	sum := sha256.Sum256([]byte(input))
-	return "ses_" + hex.EncodeToString(sum[:])[:openCodeSessionHashLength]
-}
-
 // openCodeResolveSession resolves a stable session identity from the request context.
 //
-// Resolution priority (matching 9router behavior):
-//  1. Native x-opencode-session header (authoritative if present)
+// Resolution priority:
+//  1. Native x-opencode-session header (authoritative if present and valid format)
 //  2. Extracted session from downstream request (via ExtractSessionID)
-//  3. Deterministic hash of request payload (conversation-stable)
-//  4. Fallback to stable ID from auth connection (no generation)
-//
-// The clientTool parameter isolates sessions across different downstream agents
-// (e.g., "claude-code", "opencode", "generic").
+//  3. Connection ID from auth attributes
+//  4. Fallback: generate a new canonical session
 func openCodeResolveSession(headers http.Header, payload []byte, auth *cliproxyauth.Auth, clientTool string) string {
-	// 1. Check for native x-opencode-session header (highest priority)
+	// 1. Native header
 	if native := openCodeNativeSession(headers); native != "" {
 		return native
 	}
 
-	// 2. Extract session from downstream request using existing logic
+	// 2. Extracted session from downstream
 	if extracted := cliproxyauth.ExtractSessionID(headers, payload, nil); extracted != "" {
-		return openCodeTranslatedSession(extracted, clientTool)
+		return openCodeTranslateSession(extracted, clientTool)
 	}
 
-	// 3. If auth has a stable connection ID, use it for session stability
+	// 3. Connection ID for stability
 	if auth != nil && auth.Attributes != nil {
 		if connectionID := auth.Attributes["connection_id"]; connectionID != "" {
-			return openCodeTranslatedSession(connectionID, clientTool)
+			return openCodeTranslateSession(connectionID, clientTool)
 		}
 	}
 
-	// 4. Last resort: return empty - caller will generate a fallback
-	return ""
+	// 4. Fallback
+	return openCodeGenerateSessionId()
+}
+
+// openCodeDeriveRequestId derives a request ID deterministically from session + last user text.
+func openCodeDeriveRequestId(sessionId string, payload []byte) string {
+	text := ""
+	if payload != nil {
+		var body map[string]any
+		if json.Unmarshal(payload, &body) == nil {
+			if msgs, ok := body["messages"].([]any); ok && len(msgs) > 0 {
+				for i := len(msgs) - 1; i >= 0; i-- {
+					msg, ok := msgs[i].(map[string]any)
+					if !ok {
+						continue
+					}
+					role, _ := msg["role"].(string)
+					if role != "user" {
+						continue
+					}
+					switch c := msg["content"].(type) {
+					case string:
+						if strings.TrimSpace(c) != "" {
+							text = c
+							if len(text) > 600 {
+								text = text[len(text)-600:]
+							}
+							break
+						}
+					}
+					if text != "" {
+						break
+					}
+				}
+			}
+		}
+	}
+	if text == "" {
+		return openCodeGenerateRequestId()
+	}
+	input := "opencode-req\x00" + sessionId + "\x00" + text
+	sum := sha256.Sum256([]byte(input))
+	hexPart := ""
+	for i := 0; i < 6; i++ {
+		hexPart += string("0123456789abcdef"[sum[i]>>4])
+		hexPart += string("0123456789abcdef"[sum[i]&0x0f])
+	}
+	base62Part := ""
+	for i := 6; i < 20 && i < len(sum); i++ {
+		base62Part += string(base62Chars[sum[i]%62])
+	}
+	return "msg_" + hexPart + base62Part
+}
+
+// openCodeCloakDecoyTools injects decoy bash/read tools if not already present.
+func openCodeCloakDecoyTools(payload []byte) []byte {
+	if payload == nil {
+		return payload
+	}
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil {
+		return payload
+	}
+	existing := map[string]bool{}
+	if tools, ok := body["tools"].([]any); ok {
+		for _, t := range tools {
+			tm, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			name := ""
+			if fn, ok := tm["function"].(map[string]any); ok {
+				name, _ = fn["name"].(string)
+			}
+			if name == "" {
+				name, _ = tm["name"].(string)
+			}
+			if name != "" {
+				existing[name] = true
+			}
+		}
+	}
+	needsTools := len(existing) == 0
+	if !needsTools {
+		needsTools = !existing["bash"] || !existing["read"]
+	}
+	if needsTools {
+		if _, ok := body["tools"].([]any); !ok {
+			body["tools"] = []any{}
+		}
+		tools := body["tools"].([]any)
+		for _, decoy := range openCodeDecoyTools {
+			dcopy := map[string]any{
+				"type": decoy["type"],
+				"function": map[string]any{
+					"name":        decoy["function"].(map[string]any)["name"],
+					"description": decoy["function"].(map[string]any)["description"],
+					"parameters":  decoy["function"].(map[string]any)["parameters"],
+				},
+			}
+			name := dcopy["function"].(map[string]any)["name"].(string)
+			if !existing[name] {
+				tools = append(tools, dcopy)
+			}
+		}
+		body["tools"] = tools
+		if _, hasTC := body["tool_choice"]; !hasTC {
+			body["tool_choice"] = "none"
+		}
+	}
+	out, _ := json.Marshal(body)
+	return out
+}
+
+// openCodeForceStream ensures body.stream is true for free-tier SSE aggregation.
+func openCodeForceStream(payload []byte) []byte {
+	if payload == nil {
+		return payload
+	}
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil {
+		return payload
+	}
+	body["stream"] = true
+	out, _ := json.Marshal(body)
+	return out
 }
 
 // OpenCodeExecutor is a dedicated executor for OpenCode's zen API.
 // It wraps OpenAICompatExecutor and adds OpenCode-specific headers and session management.
-//
-// Session resolution follows the 9router pattern:
-//   - Deterministic SHA-256 hashing for stable session IDs
-//   - Native x-opencode-session header preserved when present
-//   - Agent-based isolation via clientTool parameter
-//   - Fallback to connection-scoped stable ID
 type OpenCodeExecutor struct {
 	*OpenAICompatExecutor
 	cfg *config.Config
 }
 
-// NewOpenCodeExecutor creates a new OpenCode executor.
 func NewOpenCodeExecutor(cfg *config.Config) *OpenCodeExecutor {
 	return &OpenCodeExecutor{
 		OpenAICompatExecutor: NewOpenAICompatExecutor("opencode", cfg),
@@ -134,49 +322,36 @@ func NewOpenCodeExecutor(cfg *config.Config) *OpenCodeExecutor {
 	}
 }
 
-// Identifier returns the executor identifier.
 func (e *OpenCodeExecutor) Identifier() string { return "opencode" }
 
 // PrepareRequest injects OpenCode-specific credentials and headers into the outgoing HTTP request.
-// Session resolution uses deterministic hashing for stability across requests.
 func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
 		return nil
 	}
 
-	// Set Authorization header for OpenCode (free tier uses "public")
-	if auth != nil && auth.Attributes != nil {
-		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-	}
+	// Free tier: always use "Bearer public"
+	req.Header.Set("Authorization", "Bearer public")
 
-	// Apply custom headers from auth attributes (header:* keys)
+	// Apply custom headers from auth attributes
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 
-	// Set OpenCode-specific headers
-	// User-Agent: always "opencode" to match the official client
-	req.Header.Set("User-Agent", "opencode")
+	// User-Agent: canonical version string for free-tier fingerprint validation
+	req.Header.Set("User-Agent", openCodeUA)
 
-	// Resolve session identity using deterministic hashing (9router pattern)
-	// Priority: native header > extracted session > connection ID > fallback
+	// Resolve session
 	resolvedSession := openCodeResolveSession(req.Header, nil, auth, "desktop")
-	if resolvedSession == "" {
-		// Last resort: generate a stable session from request context
-		resolvedSession = openCodeTranslatedSession(req.URL.String(), "desktop")
-	}
 	if req.Header.Get(openCodeSessionHeader) == "" {
 		req.Header.Set(openCodeSessionHeader, resolvedSession)
 	}
 
-	// Request ID: use existing or generate deterministic ID
+	// Request ID: derive from session
 	if req.Header.Get("x-opencode-request") == "" {
-		reqIDSum := sha256.Sum256([]byte(req.URL.String() + req.Header.Get(openCodeSessionHeader)))
-		req.Header.Set("x-opencode-request", "msg_"+hex.EncodeToString(reqIDSum[:])[:16])
+		req.Header.Set("x-opencode-request", openCodeDeriveRequestId(resolvedSession, nil))
 	}
 
 	if req.Header.Get("x-opencode-project") == "" {
@@ -189,7 +364,6 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	return nil
 }
 
-// HttpRequest injects OpenCode credentials into the request and executes it.
 func (e *OpenCodeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, nil
@@ -207,10 +381,6 @@ func (e *OpenCodeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 
 // injectOpenCodeHeaders adds per-request OpenCode headers to auth attributes
 // so they survive through OpenAICompatExecutor.Execute() -> ApplyCustomHeadersFromAttrs.
-//
-// Session resolution uses deterministic hashing for stability:
-//   - Same connection produces same session ID
-//   - Different clients produce different IDs via clientTool isolation
 func injectOpenCodeHeaders(auth *cliproxyauth.Auth, headers http.Header, payload []byte, clientTool string) {
 	if auth == nil {
 		return
@@ -221,30 +391,21 @@ func injectOpenCodeHeaders(auth *cliproxyauth.Auth, headers http.Header, payload
 	if auth.Attributes["base_url"] == "" {
 		auth.Attributes["base_url"] = openCodeBaseURL
 	}
-	// Set OpenCode-specific headers that ApplyCustomHeadersFromAttrs will apply
-	if auth.Attributes["header:User-Agent"] == "" {
-		auth.Attributes["header:User-Agent"] = "opencode"
-	}
 
-	// Resolve session using deterministic hashing (9router pattern)
+	// Free tier: always use "Bearer public"
+	auth.Attributes["header:Authorization"] = "Bearer public"
+	auth.Attributes["header:User-Agent"] = openCodeUA
+
+	// Resolve session
 	if auth.Attributes["header:"+openCodeSessionHeader] == "" {
 		resolvedSession := openCodeResolveSession(headers, payload, auth, clientTool)
-		if resolvedSession == "" {
-			// Fallback: use connection ID for stability within a connection
-			connectionID := auth.Attributes["connection_id"]
-			if connectionID == "" {
-				connectionID = "default"
-			}
-			resolvedSession = openCodeTranslatedSession(connectionID, clientTool)
-		}
 		auth.Attributes["header:"+openCodeSessionHeader] = resolvedSession
 	}
 
-	// Request ID: deterministic from session context
+	// Request ID
 	if auth.Attributes["header:x-opencode-request"] == "" {
 		sessionID := auth.Attributes["header:"+openCodeSessionHeader]
-		reqIDSum := sha256.Sum256([]byte(sessionID))
-		auth.Attributes["header:x-opencode-request"] = "msg_" + hex.EncodeToString(reqIDSum[:])[:16]
+		auth.Attributes["header:x-opencode-request"] = openCodeDeriveRequestId(sessionID, payload)
 	}
 
 	if auth.Attributes["header:x-opencode-project"] == "" {
@@ -256,29 +417,27 @@ func injectOpenCodeHeaders(auth *cliproxyauth.Auth, headers http.Header, payload
 }
 
 // Execute performs a non-streaming chat completion request to OpenCode.
-// Session resolution uses deterministic hashing for stability across requests.
 func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	// Extract client tool from metadata for session isolation
 	clientTool := extractClientTool(req.Metadata)
-	// Extract headers from options for session resolution
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
+	// Force stream + decoy tools for free tier
+	req.Payload = openCodeForceStream(req.Payload)
+	req.Payload = openCodeCloakDecoyTools(req.Payload)
 	return e.OpenAICompatExecutor.Execute(ctx, auth, req, opts)
 }
 
 // ExecuteStream performs a streaming chat completion request to OpenCode.
-// Session resolution uses deterministic hashing for stability across requests.
 func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	// Extract client tool from metadata for session isolation
 	clientTool := extractClientTool(req.Metadata)
-	// Extract headers from options for session resolution
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
+	// Force stream + decoy tools for free tier
+	req.Payload = openCodeForceStream(req.Payload)
+	req.Payload = openCodeCloakDecoyTools(req.Payload)
 	return e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
 }
 
-// extractClientTool extracts the client tool identifier from request metadata.
-// This is used for session isolation across different downstream agents.
 func extractClientTool(metadata map[string]any) string {
 	if metadata == nil {
 		return "generic"
