@@ -197,6 +197,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "opencode-go":
+		models = registry.GetAPIKeyProviderModels("opencode-go")
+		if entry := s.resolveConfigOpenCodeGoKey(a); entry != nil {
+			excluded = entry.ExcludedModels
+			if len(entry.Models) > 0 {
+				models = buildConfigModels(entry.Models, "opencode-go", "openai")
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -553,6 +562,13 @@ func (s *Service) resolveConfigOpenRouterKey(auth *coreauth.Auth) *config.CodexK
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.OpenRouterKey, false)
+}
+
+func (s *Service) resolveConfigOpenCodeGoKey(auth *coreauth.Auth) *config.CodexKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.OpenCodeGoKey, false)
 }
 
 func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {

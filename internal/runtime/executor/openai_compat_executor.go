@@ -67,8 +67,6 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 
-
-
 	return nil
 }
 
@@ -209,12 +207,27 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	outBody := body
+	usedUsage := helps.ParseOpenAIUsage(body)
+	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("data:")) {
+		// Some providers (e.g. OpenCode free-tier) force streaming upstream even
+		// for non-stream requests. Aggregate the SSE body into a single JSON
+		// payload so non-stream callers don't receive raw SSE frames.
+		aggregated, usageDetail, aggErr := aggregateOpenAIChatCompletionStream(body)
+		if aggErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, aggErr)
+			err = statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("upstream SSE body could not be aggregated: %v", aggErr)}
+			return resp, err
+		}
+		outBody = aggregated
+		usedUsage = usageDetail
+	}
+	reporter.Publish(ctx, usedUsage)
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, outBody, &param)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}

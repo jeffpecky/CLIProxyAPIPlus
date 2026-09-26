@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,8 +10,21 @@ import (
 )
 
 func TestHeadroomStartupTimeoutAllowsSlowWindowsColdStart(t *testing.T) {
-	if headroomStartupTimeout != 30*time.Second {
-		t.Fatalf("startup timeout = %v, want 30s", headroomStartupTimeout)
+	if headroomStartupTimeout < 2*time.Minute {
+		t.Fatalf("startup timeout = %v, want at least 2m for Windows cold starts", headroomStartupTimeout)
+	}
+	if got := headroomStartupTimeoutLabel(); got != "180s" {
+		t.Fatalf("startup timeout label = %q, want %q", got, "180s")
+	}
+}
+
+func TestWaitForHeadroomStartupSucceedsWhenHealthyAfterSlowStart(t *testing.T) {
+	healthyAt := time.Now().Add(400 * time.Millisecond)
+	healthy := func(string) bool { return !time.Now().Before(healthyAt) }
+
+	ready, exitCode := waitForHeadroomStartup(context.Background(), "http://127.0.0.1:8787", 30*time.Second, 50*time.Millisecond, healthy, make(chan int))
+	if !ready || exitCode != nil {
+		t.Fatalf("ready = %v, exitCode = %v, want healthy startup", ready, exitCode)
 	}
 }
 

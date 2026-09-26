@@ -1169,7 +1169,7 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 	gitDir := filepath.Join(repoDir, ".git")
 	clonedGitDir := filepath.Join(cloneDir, ".git")
 	backupGitDir := filepath.Join(recoveryRoot, "corrupt.git")
-	retainRecovery, errInstall := installRecoveredGitDirectory(gitDir, clonedGitDir, backupGitDir, os.Rename)
+	retainRecovery, errInstall := installRecoveredGitDirectory(gitDir, clonedGitDir, backupGitDir, renameWithRetry)
 	if retainRecovery {
 		cleanupRecovery = false
 	}
@@ -1355,6 +1355,55 @@ func rollbackRecoveredRepository(repoDir, gitDir, backupGitDir, backupWorktreeDi
 	return nil
 }
 
+// isTransientRenameError reports whether a rename failure is likely caused by a
+// temporary file lock (Windows sharing/lock violations or access-denied while
+// another process holds an open handle).
+func isTransientRenameError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, pattern := range []string{
+		"access is denied",
+		"being used by another process",
+		"sharing violation",
+		"lock violation",
+	} {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// renameWithRetry renames with exponential backoff on transient lock errors.
+// go-git keeps packfile index descriptors open for a one-second grace period
+// after the last read, and Windows refuses to rename a directory containing
+// open handles, so retries must be able to outlast that window.
+func renameWithRetry(oldPath, newPath string) error {
+	const (
+		maxAttempts = 10
+		baseDelay   = 50 * time.Millisecond
+		maxDelay    = 500 * time.Millisecond
+	)
+	var errRename error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		errRename = os.Rename(oldPath, newPath)
+		if errRename == nil || !isTransientRenameError(errRename) {
+			return errRename
+		}
+		delay := baseDelay << uint(attempt)
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+		time.Sleep(delay)
+	}
+	return errRename
+}
+
 func installRecoveredGitDirectory(gitDir, clonedGitDir, backupGitDir string, rename func(string, string) error) (bool, error) {
 	if errRename := rename(gitDir, backupGitDir); errRename != nil {
 		return false, fmt.Errorf("backup corrupt git directory: %w", errRename)
@@ -1375,7 +1424,7 @@ func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
 	if errRemove := os.RemoveAll(gitDir); errRemove != nil {
 		return fmt.Errorf("remove recovered git directory: %w", errRemove)
 	}
-	if errRename := os.Rename(backupGitDir, gitDir); errRename != nil {
+	if errRename := renameWithRetry(backupGitDir, gitDir); errRename != nil {
 		return fmt.Errorf("restore original git directory: %w", errRename)
 	}
 	return nil

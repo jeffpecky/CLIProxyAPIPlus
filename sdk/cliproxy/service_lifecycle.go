@@ -112,9 +112,10 @@ func (s *Service) Run(ctx context.Context) error {
 		// scheduler picks them up and model routing can resolve the provider.
 		refreshAPIKeyProviderAuths := func() {
 			apiKeyProviders := map[string]bool{
-				"nvidia":     true,
-				"openrouter": true,
-				"cloudflare": true,
+				"nvidia":      true,
+				"openrouter":  true,
+				"cloudflare":  true,
+				"opencode-go": true,
 			}
 			for _, auth := range s.coreManager.List() {
 				if auth != nil && !auth.Disabled && apiKeyProviders[auth.Provider] {
@@ -124,6 +125,14 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}
 		registry.SetAPIKeyModelsPostFetchHook(refreshAPIKeyProviderAuths)
+		// The boot-time model fetch may finish before the hook is set; re-run once
+		// when any API-key provider catalog is already populated.
+		for _, provider := range []string{"nvidia", "openrouter", "cloudflare", "opencode-go"} {
+			if models := registry.GetAPIKeyProviderModels(provider); len(models) > 0 {
+				refreshAPIKeyProviderAuths()
+				break
+			}
+		}
 	}
 
 	if !homeEnabled {
@@ -238,7 +247,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
-
 
 	select {
 	case <-ctx.Done():

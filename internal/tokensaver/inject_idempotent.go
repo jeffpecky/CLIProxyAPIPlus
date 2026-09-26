@@ -10,10 +10,11 @@ import "strings"
 // incorrectly match the substring "RULE".
 //
 // Examples:
-//   hasPrompt("base", "base") = true (exact match)
-//   hasPrompt("base\n\nRULE", "RULE") = true (segment match)
-//   hasPrompt("You are RULE follower", "RULE") = false (substring, not segment)
-//   hasPrompt("X"*150+"_A", "X"*150+"_B") = false (distinct despite 150-char prefix)
+//
+//	hasPrompt("base", "base") = true (exact match)
+//	hasPrompt("base\n\nRULE", "RULE") = true (segment match)
+//	hasPrompt("You are RULE follower", "RULE") = false (substring, not segment)
+//	hasPrompt("X"*150+"_A", "X"*150+"_B") = false (distinct despite 150-char prefix)
 //
 // This fixes issue #3202 where distinct prompts sharing a long prefix were collapsed.
 func hasPrompt(haystack, prompt string) bool {
@@ -41,10 +42,11 @@ func hasPrompt(haystack, prompt string) bool {
 // Idempotent: calling multiple times with the same prompt produces no duplicates.
 //
 // Examples:
-//   dedupStringAppend("", "A") = "A"
-//   dedupStringAppend("A", "B") = "A\n\nB"
-//   dedupStringAppend("A\n\nB", "A") = "A\n\nB" (idempotent, A already present)
-//   dedupStringAppend("A\n\nB", "C") = "A\n\nB\n\nC"
+//
+//	dedupStringAppend("", "A") = "A"
+//	dedupStringAppend("A", "B") = "A\n\nB"
+//	dedupStringAppend("A\n\nB", "A") = "A\n\nB" (idempotent, A already present)
+//	dedupStringAppend("A\n\nB", "C") = "A\n\nB\n\nC"
 func dedupStringAppend(curr, prompt string) string {
 	if curr == "" {
 		return prompt

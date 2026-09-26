@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -180,6 +181,12 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	// Refetch remote model catalogs when API-key provider credentials change so
+	// models added after boot (e.g. OpenCode Go kimi-k3) route without a restart.
+	s.scheduleAPIKeyProviderModelRefresh(ctx, cfg)
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if s.coreManager != nil && !cfg.Home.Enabled && cfg.SaveCooldownStatus {
 		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(registrationCtx); errRestoreCooldown != nil && ctx.Err() == nil {
 			log.Warnf("failed to restore cooldown state after config update: %v", errRestoreCooldown)
@@ -234,6 +241,20 @@ func (s *Service) reloadConfigFromWatcher() bool {
 		return false
 	}
 	return s.watcher.ReloadConfigIfChanged()
+}
+
+// scheduleAPIKeyProviderModelRefresh asynchronously applies API-key provider
+// credentials and refetches remote model catalogs when those credentials change.
+func (s *Service) scheduleAPIKeyProviderModelRefresh(ctx context.Context, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	nvidiaKeys, cloudflareKeys, openrouterKeys, openCodeGoKeys := cfg.APIKeyProviderModelEntries()
+	go func() {
+		if err := registry.ApplyAPIKeyProviderModelKeys(context.WithoutCancel(ctx), nvidiaKeys, cloudflareKeys, openrouterKeys, openCodeGoKeys); err != nil {
+			log.Warnf("failed to refresh API-key provider models after config update: %v", err)
+		}
+	}()
 }
 
 func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Config) {

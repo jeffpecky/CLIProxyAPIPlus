@@ -314,6 +314,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "opencode":
 		// OpenCode has a dedicated executor with custom headers and session management
 		s.coreManager.RegisterExecutor(executor.NewOpenCodeExecutor(cfg))
+	case "opencode-go":
+		// OpenCode Go uses the same session/header behavior with a real API key and Go base URL.
+		s.coreManager.RegisterExecutor(executor.NewOpenCodeGoExecutor(cfg))
 	case "xai":
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("xai")

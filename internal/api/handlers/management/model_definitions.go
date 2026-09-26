@@ -56,12 +56,12 @@ func (h *Handler) buildOpenAICompatModelDefinitions() []*registry.ModelInfo {
 		}
 		for _, model := range entry.Models {
 			info := &registry.ModelInfo{
-				ID:         model.Name,
-				Object:     "model",
-				Created:    now,
-				OwnedBy:    "openai-compatibility",
-				Type:       "openai-compatibility",
-				IsCompat:   true,
+				ID:       model.Name,
+				Object:   "model",
+				Created:  now,
+				OwnedBy:  "openai-compatibility",
+				Type:     "openai-compatibility",
+				IsCompat: true,
 			}
 			if model.Alias != "" {
 				info.Name = model.Alias

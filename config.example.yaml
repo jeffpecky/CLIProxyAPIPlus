@@ -442,6 +442,22 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# OpenCode Go API keys
+# Requires an OpenCode Go subscription ($10/mo, promo $5/mo).
+# Create a key at https://opencode.ai/console (same key as the console "Service Account" key).
+# Default base URL: https://opencode.ai/zen/go/v1
+# opencode-go-api-key:
+#   - api-key: "oc_sk_..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     prefix: "go" # optional: require calls like "go/glm-5.3" to target this credential
+#     base-url: "https://opencode.ai/zen/go/v1" # optional custom endpoint
+#     models:
+#       - name: "glm-5.3"      # upstream model name
+#         alias: "glm-latest"  # client alias mapped to the upstream model
+#         display-name: "GLM 5.3" # optional catalog display name
+#     excluded-models:
+#       - "mimo-v2.5"         # exclude specific models (exact match)
+
 # xAI API keys
 # Uses the native xAI executor, including its Responses namespace-tool handling.
 # xai-api-key:

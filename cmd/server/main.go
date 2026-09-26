@@ -1007,19 +1007,13 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool, cfg *config.Config)
 		registry.StartOpenCodeModelsUpdater(context.Background())
 	}
 
-	// Start API-key provider model fetchers (NVIDIA, OpenRouter)
+	// Start API-key provider model fetchers (NVIDIA, Cloudflare, OpenRouter, OpenCode Go).
+	// Always start the updater when a config is present so keys added via hot-reload
+	// trigger remote model-catalog refetches without a process restart.
 	if cfg != nil {
 		registry.SetAPIKeyModelsEnabled(true)
-		var nvidiaKeys, openrouterKeys []registry.APIKeyEntry
-		for _, k := range cfg.NVIDIAKey {
-			nvidiaKeys = append(nvidiaKeys, registry.APIKeyEntry{APIKey: k.APIKey})
-		}
-		for _, k := range cfg.OpenRouterKey {
-			openrouterKeys = append(openrouterKeys, registry.APIKeyEntry{APIKey: k.APIKey})
-		}
-		if len(nvidiaKeys) > 0 || len(openrouterKeys) > 0 {
-			registry.StartAPIKeyModelsUpdater(context.Background(), nvidiaKeys, nil, openrouterKeys)
-		}
+		nvidiaKeys, cloudflareKeys, openrouterKeys, openCodeGoKeys := cfg.APIKeyProviderModelEntries()
+		registry.StartAPIKeyModelsUpdater(context.Background(), nvidiaKeys, cloudflareKeys, openrouterKeys, openCodeGoKeys)
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}

@@ -66,6 +66,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeNVIDIAKeys(ctx)...)
 	// OpenRouter API Keys
 	out = append(out, s.synthesizeOpenRouterKeys(ctx)...)
+	// OpenCode Go API Keys
+	out = append(out, s.synthesizeOpenCodeGoKeys(ctx)...)
 
 	return out, nil
 }
@@ -236,9 +238,15 @@ func (s *ConfigSynthesizer) synthesizeOpenRouterKeys(ctx *SynthesisContext) []*c
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.OpenRouterKey, "openrouter")
 }
 
+// synthesizeOpenCodeGoKeys creates Auth entries for OpenCode Go API keys.
+func (s *ConfigSynthesizer) synthesizeOpenCodeGoKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.OpenCodeGoKey, "opencode-go")
+}
+
 var defaultCodexStyleBaseURLs = map[string]string{
-	"nvidia":     "https://integrate.api.nvidia.com/v1",
-	"openrouter": "https://openrouter.ai/api/v1",
+	"nvidia":      "https://integrate.api.nvidia.com/v1",
+	"openrouter":  "https://openrouter.ai/api/v1",
+	"opencode-go": "https://opencode.ai/zen/go/v1",
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {

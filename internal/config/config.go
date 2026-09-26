@@ -4,6 +4,12 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+)
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
@@ -172,6 +178,9 @@ type Config struct {
 	// OpenRouterKey defines OpenRouter API key configurations.
 	OpenRouterKey []CodexKey `yaml:"openrouter-api-key" json:"openrouter-api-key"`
 
+	// OpenCodeGoKey defines OpenCode Go subscription API key configurations.
+	OpenCodeGoKey []CodexKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
+
 	// AmpCode contains the fork-maintained Amp CLI routing and management configuration.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
@@ -193,4 +202,58 @@ type Config struct {
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// APIKeyProviderModelEntries returns per-provider API-key entries for remote model-catalog fetches.
+func (cfg *Config) APIKeyProviderModelEntries() (nvidia, cloudflare, openrouter, openCodeGo []registry.APIKeyEntry) {
+	if cfg == nil {
+		return
+	}
+	nvidia = codexKeyAPIKeyEntries(cfg.NVIDIAKey)
+	openrouter = codexKeyAPIKeyEntries(cfg.OpenRouterKey)
+	openCodeGo = codexKeyAPIKeyEntries(cfg.OpenCodeGoKey)
+	for _, k := range cfg.CloudflareKey {
+		key := strings.TrimSpace(k.APIKey)
+		if key == "" {
+			continue
+		}
+		accountID := cloudflareAccountIDFromBaseURL(k.BaseURL)
+		if accountID == "" {
+			continue
+		}
+		cloudflare = append(cloudflare, registry.APIKeyEntry{APIKey: key, AccountID: accountID})
+	}
+	return
+}
+
+func codexKeyAPIKeyEntries(keys []CodexKey) []registry.APIKeyEntry {
+	var out []registry.APIKeyEntry
+	for _, k := range keys {
+		key := strings.TrimSpace(k.APIKey)
+		if key == "" {
+			continue
+		}
+		out = append(out, registry.APIKeyEntry{APIKey: key})
+	}
+	return out
+}
+
+func cloudflareAccountIDFromBaseURL(baseURL string) string {
+	u := strings.TrimSpace(baseURL)
+	if u == "" {
+		return ""
+	}
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return u
+	}
+	const marker = "/accounts/"
+	idx := strings.Index(u, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := u[idx+len(marker):]
+	if end := strings.IndexAny(rest, "/?"); end >= 0 {
+		return rest[:end]
+	}
+	return rest
 }

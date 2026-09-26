@@ -18,10 +18,17 @@ import (
 )
 
 const (
-	headroomStartupTimeout = 30 * time.Second
+	// Headroom's Python startup imports (transformers, openai, fastapi, mcp,
+	// tiktoken) routinely take 60-75s on Windows before the proxy binds its
+	// port, so the readiness budget must cover a cold start with AV scanning.
+	headroomStartupTimeout = 180 * time.Second
 	headroomPollInterval   = 200 * time.Millisecond
 	headroomLogTailLines   = 20
 )
+
+func headroomStartupTimeoutLabel() string {
+	return strconv.Itoa(int(headroomStartupTimeout/time.Second)) + "s"
+}
 
 var (
 	headroomLogURLPattern    = regexp.MustCompile(`https?://[^\s]+`)
@@ -461,11 +468,11 @@ func (h *Handler) headroomStart(c *gin.Context) {
 	}
 	if !ready {
 		if err := stopHeadroomPID(headroomOwnership{pid: managedPID, identity: identity}); err != nil {
-			c.JSON(http.StatusInternalServerError, headroomStartupFailure("cleanup_failed", fmt.Sprintf("Headroom did not become healthy within 30s, and process-tree cleanup failed: %v", err), nil))
+			c.JSON(http.StatusInternalServerError, headroomStartupFailure("cleanup_failed", fmt.Sprintf("Headroom did not become healthy within %s, and process-tree cleanup failed: %v", headroomStartupTimeoutLabel(), err), nil))
 			return
 		}
 		clearHeadroomPID()
-		c.JSON(http.StatusInternalServerError, headroomStartupFailure("readiness_timeout", "Headroom did not become healthy within 30s. Process tree stopped.", nil))
+		c.JSON(http.StatusInternalServerError, headroomStartupFailure("readiness_timeout", fmt.Sprintf("Headroom did not become healthy within %s. Process tree stopped.", headroomStartupTimeoutLabel()), nil))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "pid": managedPID})

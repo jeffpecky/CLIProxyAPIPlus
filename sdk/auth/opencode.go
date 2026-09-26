@@ -29,12 +29,12 @@ func (a *OpenCodeAuthenticator) Provider() string {
 func (a *OpenCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
-		ID:         "opencode-free",
-		Provider:   "opencode",
-		Label:      "OpenCode Free",
-		Status:     coreauth.StatusActive,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:        "opencode-free",
+		Provider:  "opencode",
+		Label:     "OpenCode Free",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
 		Attributes: map[string]string{
 			"header:Authorization":      "Bearer public",
 			"header:User-Agent":         "opencode",

@@ -627,10 +627,10 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 }
 
 var (
-	refreshLeadMu             sync.RWMutex
-	refreshLeadFactories      = make(map[string]func() *time.Duration)
-	refreshMaxAgeMu           sync.RWMutex
-	refreshMaxAgeFactories    = make(map[string]func() *time.Duration)
+	refreshLeadMu          sync.RWMutex
+	refreshLeadFactories   = make(map[string]func() *time.Duration)
+	refreshMaxAgeMu        sync.RWMutex
+	refreshMaxAgeFactories = make(map[string]func() *time.Duration)
 )
 
 func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration) {

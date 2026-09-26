@@ -208,7 +208,7 @@ func TestTokenSaverMutatesExecutionPayload(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
 		TokenSaver: sdkconfig.TokenSaverConfig{
 			Enabled: true,
-			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "full"},
 		},
 	})
 
@@ -235,7 +235,7 @@ func TestTokenSaverHeaderOptOutLeavesExecutionPayload(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
 		TokenSaver: sdkconfig.TokenSaverConfig{
 			Enabled: true,
-			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "full"},
 		},
 	})
 	headers := http.Header{"X-CLIProxy-Token-Saver": []string{"off"}}
@@ -284,7 +284,7 @@ func TestTokenSaverMutatesStreamExecutionPayload(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
 		TokenSaver: sdkconfig.TokenSaverConfig{
 			Enabled: true,
-			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "terse"},
+			Caveman: sdkconfig.TokenSaverPromptConfig{Enabled: true, Level: "full"},
 		},
 	})
 

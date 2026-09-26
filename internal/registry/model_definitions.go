@@ -348,6 +348,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQoderModels()
 	case "opencode":
 		return nil
+	case "opencode-go":
+		return nil
 	default:
 		return nil
 	}

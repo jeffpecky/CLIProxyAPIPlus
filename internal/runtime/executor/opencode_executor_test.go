@@ -97,7 +97,7 @@ func TestOpenCodeIsValidSessionFormat(t *testing.T) {
 		"ses_",
 		"ses_12345",
 		"msg_f534dfae8ffeCy4Ee4tLWNygDc",
-		"ses_g534dfae8ffeCy4Ee4tLWNygDc", // g is not hex
+		"ses_g534dfae8ffeCy4Ee4tLWNygDc",  // g is not hex
 		"ses_f534dfae8ffeCy4Ee4tLWNygDcX", // too long
 	}
 	for _, s := range invalid {
@@ -376,6 +376,124 @@ func TestOpenCodeSessionReuse(t *testing.T) {
 	}
 
 	_ = executor
+}
+
+func TestOpenCodeIsMuseSpark(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"muse-spark-1.3-contributor-free", true},
+		{"muse-spark-1.2-contributor-free", true},
+		{"meta/muse-spark-1.3", true},
+		{"mimo-v2.5-free", false},
+		{"gpt-4o", false},
+		{"claude-3-5-sonnet", false},
+	}
+	for _, tt := range tests {
+		if got := openCodeIsMuseSpark(tt.model); got != tt.want {
+			t.Errorf("openCodeIsMuseSpark(%q) = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestOpenCodeChatToResponses(t *testing.T) {
+	chatBody := []byte(`{
+		"model": "muse-spark-1.3-contributor-free",
+		"messages": [
+			{"role": "system", "content": "You are helpful"},
+			{"role": "user", "content": "hi"}
+		],
+		"max_tokens": 1000,
+		"tools": [
+			{"type": "function", "function": {"name": "my_tool", "description": "desc", "parameters": {"type": "object"}}}
+		]
+	}`)
+	converted := openCodeChatToResponses(chatBody)
+	if converted == nil {
+		t.Fatal("openCodeChatToResponses returned nil")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(converted, &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if body["model"] != "muse-spark-1.3-contributor-free" {
+		t.Errorf("model = %v, want muse-spark-1.3-contributor-free", body["model"])
+	}
+	if body["instructions"] != "You are helpful" {
+		t.Errorf("instructions = %v, want 'You are helpful'", body["instructions"])
+	}
+	input, ok := body["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("expected 1 input item, got %v", body["input"])
+	}
+	item := input[0].(map[string]any)
+	if item["role"] != "user" {
+		t.Errorf("input role = %v, want user", item["role"])
+	}
+	if body["stream"] != true {
+		t.Errorf("stream = %v, want true", body["stream"])
+	}
+	if body["store"] != false {
+		t.Errorf("store = %v, want false", body["store"])
+	}
+}
+
+func TestOpenCodeChatToResponsesWithContentParts(t *testing.T) {
+	chatBody := []byte(`{
+		"model": "muse-spark-1.3-contributor-free",
+		"system": "System instructions here",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "hello world"}]},
+			{"role": "assistant", "content": [{"type": "text", "text": "hi back"}]}
+		],
+		"tools": [
+			{"name": "test_tool", "description": "desc", "input_schema": {"type": "object", "properties": {}}}
+		]
+	}`)
+	converted := openCodeChatToResponses(chatBody)
+	if converted == nil {
+		t.Fatal("openCodeChatToResponses returned nil")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(converted, &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if body["instructions"] != "System instructions here" {
+		t.Errorf("instructions = %v, want 'System instructions here'", body["instructions"])
+	}
+
+	input, ok := body["input"].([]any)
+	if !ok || len(input) != 2 {
+		t.Fatalf("expected 2 input items, got %v", body["input"])
+	}
+
+	userItem := input[0].(map[string]any)
+	userContent := userItem["content"].([]any)
+	part0 := userContent[0].(map[string]any)
+	if part0["type"] != "input_text" || part0["text"] != "hello world" {
+		t.Errorf("user part0 = %v, want type: input_text, text: hello world", part0)
+	}
+
+	asstItem := input[1].(map[string]any)
+	asstContent := asstItem["content"].([]any)
+	asstPart0 := asstContent[0].(map[string]any)
+	if asstPart0["type"] != "output_text" || asstPart0["text"] != "hi back" {
+		t.Errorf("asst part0 = %v, want type: output_text, text: hi back", asstPart0)
+	}
+
+	tools, ok := body["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %v", body["tools"])
+	}
+	tool0 := tools[0].(map[string]any)
+	if tool0["name"] != "test_tool" {
+		t.Errorf("tool name = %v, want test_tool", tool0["name"])
+	}
 }
 
 // newTestServer creates a test HTTP server with the given handler.

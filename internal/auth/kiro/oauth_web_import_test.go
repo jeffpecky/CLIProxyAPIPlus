@@ -85,6 +85,7 @@ func TestOAuthWebImportLoadsIDCDeviceRegistrationFromClientIDHash(t *testing.T) 
 
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 	cacheDir := filepath.Join(homeDir, ".aws", "sso", "cache")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
@@ -135,7 +136,9 @@ func TestOAuthWebImportLoadsIDCDeviceRegistrationFromClientIDHash(t *testing.T) 
 func TestOAuthWebImportRejectsIDCClientIDHashWithoutDeviceRegistration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Setenv("HOME", t.TempDir())
+	missingHome := t.TempDir()
+	t.Setenv("HOME", missingHome)
+	t.Setenv("USERPROFILE", missingHome)
 	handler := NewOAuthWebHandler(&config.Config{AuthDir: t.TempDir()})
 	router := gin.New()
 	handler.RegisterRoutes(router)

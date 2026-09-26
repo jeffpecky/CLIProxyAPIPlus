@@ -28,6 +28,14 @@ import (
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 )
 
+// registryTestWaitTimeout bounds positive waits on asynchronous service
+// progress (subscription ACKs, registry exposure, config finalization).
+// It must exceed the Home client's own operation and ACK timeouts (3s) plus
+// retry backoffs, so a transient stall under CPU contention does not expire
+// the wait while the service is still within its legal timeout window.
+// Negative windows ("nothing happened yet") keep their short deadlines.
+const registryTestWaitTimeout = 10 * time.Second
+
 type blockingServiceCooldownStore struct {
 	started chan struct{}
 }
@@ -63,7 +71,7 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 	}()
 	select {
 	case <-store.started:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("old cooldown store persistence did not start")
 	}
 
@@ -74,7 +82,7 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 	}()
 	select {
 	case <-commitDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("config commit mutex remained locked during cooldown persistence")
 	}
 
@@ -84,7 +92,7 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 		if applied {
 			t.Fatal("config runtime apply succeeded after cooldown persistence cancellation")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("config runtime apply did not honor cooldown persistence cancellation")
 	}
 }
@@ -130,7 +138,7 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(firstReturned)
 	}()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(registryTestWaitTimeout)
 	for {
 		if _, errLate := registry.BeginDispatch(); errLate != nil {
 			break
@@ -155,12 +163,12 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	pending.End()
 	select {
 	case <-firstReturned:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first replacement did not complete after its drain")
 	}
 	select {
 	case <-secondReturned:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("second replacement did not complete after the first drain")
 	}
 }
@@ -200,7 +208,7 @@ func TestServiceReplacementWaitsForPreACKSupervisorExit(t *testing.T) {
 	service.startHomeSubscriber(ctx)
 	select {
 	case <-firstSubscribed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscriber did not reach pre-ACK state")
 	}
 
@@ -222,17 +230,17 @@ func TestServiceReplacementWaitsForPreACKSupervisorExit(t *testing.T) {
 	case <-secondStartedBeforeFirstDone:
 		t.Fatal("replacement subscriber started before the pre-ACK supervisor exited")
 	case <-secondStarted:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement subscriber did not start")
 	}
 	select {
 	case <-firstDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("pre-ACK supervisor did not exit")
 	}
 	select {
 	case <-replaced:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement start did not return")
 	}
 }
@@ -273,8 +281,8 @@ func TestServiceReplacementWaitsForPublisherExitAndPinsACKedLifetimeDependencies
 	service.startHomeSubscriber(ctx)
 
 	firstFrame := waitForPublisherReplacementFrame(t, frames, 11)
-	firstClient := waitForServiceHomeClient(t, service, time.Second)
-	firstRegistry := waitForServiceRegistry(t, service, time.Second)
+	firstClient := waitForServiceHomeClient(t, service, registryTestWaitTimeout)
+	firstRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	service.homeLifecycleMu.Lock()
 	firstPublisherDone := service.homeSupervisor.publisherCompletion()
 	service.homeLifecycleMu.Unlock()
@@ -292,7 +300,7 @@ func TestServiceReplacementWaitsForPublisherExitAndPinsACKedLifetimeDependencies
 		close(replaced)
 	}()
 
-	deadline := time.NewTimer(time.Second)
+	deadline := time.NewTimer(registryTestWaitTimeout)
 	defer deadline.Stop()
 	select {
 	case errSecondConfig := <-secondConfigResult:
@@ -305,8 +313,8 @@ func TestServiceReplacementWaitsForPublisherExitAndPinsACKedLifetimeDependencies
 	close(allowSecondConfig)
 
 	secondFrame := waitForPublisherReplacementFrame(t, frames, 22)
-	secondClient := waitForServiceHomeClient(t, service, time.Second)
-	secondRegistry := waitForServiceRegistry(t, service, time.Second)
+	secondClient := waitForServiceHomeClient(t, service, registryTestWaitTimeout)
+	secondRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	if secondFrame.BarrierRevision != 22 {
 		t.Fatalf("replacement publisher frame = %#v", secondFrame)
 	}
@@ -315,7 +323,7 @@ func TestServiceReplacementWaitsForPublisherExitAndPinsACKedLifetimeDependencies
 	}
 	select {
 	case <-replaced:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement subscriber did not finish setup")
 	}
 }
@@ -385,7 +393,7 @@ func TestHomeConfigWorkerSkipsStagedConfigWhenReplacementCancels(t *testing.T) {
 	}()
 	select {
 	case <-stagePaused:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("config worker did not pause after staging")
 	}
 
@@ -396,13 +404,13 @@ func TestHomeConfigWorkerSkipsStagedConfigWhenReplacementCancels(t *testing.T) {
 	}()
 	select {
 	case <-cancelled:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement did not cancel the staged Home config")
 	}
 	releaseStageOnce.Do(func() { close(releaseStage) })
 	select {
 	case <-workerDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("canceled config worker did not exit")
 	}
 
@@ -414,7 +422,7 @@ func TestHomeConfigWorkerSkipsStagedConfigWhenReplacementCancels(t *testing.T) {
 	}
 	select {
 	case <-replacementDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement deadlocked after canceling staged config")
 	}
 }
@@ -460,7 +468,7 @@ func TestHomeConfigWorkerCommitCompletesBeforeReplacementCancellation(t *testing
 	}()
 	select {
 	case <-commitPaused:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("config worker did not pause inside commit")
 	}
 
@@ -477,12 +485,12 @@ func TestHomeConfigWorkerCommitCompletesBeforeReplacementCancellation(t *testing
 	releaseCommitOnce.Do(func() { close(releaseCommit) })
 	select {
 	case <-cancelled:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement did not cancel after config commit completed")
 	}
 	select {
 	case <-workerDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("config worker deadlocked after committed config was canceled")
 	}
 
@@ -494,7 +502,7 @@ func TestHomeConfigWorkerCommitCompletesBeforeReplacementCancellation(t *testing
 	}
 	select {
 	case <-replacementDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement deadlocked after committed config")
 	}
 }
@@ -544,7 +552,7 @@ func TestHomeConfigWorkerCancellationAtPostCommitBoundarySkipsRuntimePublish(t *
 			}()
 			select {
 			case <-runtimePaused:
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("Home config worker did not reach post-commit boundary")
 			}
 
@@ -552,7 +560,7 @@ func TestHomeConfigWorkerCancellationAtPostCommitBoundarySkipsRuntimePublish(t *
 			releaseRuntimeOnce.Do(func() { close(releaseRuntime) })
 			select {
 			case <-workerDone:
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("canceled Home config worker did not exit")
 			}
 			service.cfgMu.RLock()
@@ -622,7 +630,7 @@ func TestHomeConfigWorkerShutdownCancelsBlockedRuntimeUpdatesBeforePublish(t *te
 			}()
 			select {
 			case <-started:
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("Home config worker did not start blocked runtime update")
 			}
 
@@ -630,7 +638,7 @@ func TestHomeConfigWorkerShutdownCancelsBlockedRuntimeUpdatesBeforePublish(t *te
 			go func() { shutdownDone <- service.Shutdown(context.Background()) }()
 			select {
 			case <-workerDone:
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("shutdown did not cancel blocked runtime update")
 			}
 			select {
@@ -638,7 +646,7 @@ func TestHomeConfigWorkerShutdownCancelsBlockedRuntimeUpdatesBeforePublish(t *te
 				if errShutdown != nil {
 					t.Fatalf("Shutdown() error = %v", errShutdown)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("shutdown waited for blocked runtime update")
 			}
 			if published.Load() {
@@ -706,13 +714,13 @@ func TestHomeConfigWorkerCancelsBlockedAntigravityModelRefreshBeforePublish(t *t
 
 	select {
 	case <-modelRefreshStarted:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Home config worker did not start Antigravity model refresh")
 	}
 	cancelLifetime()
 	select {
 	case <-workerDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Home config worker did not stop after model refresh cancellation")
 	}
 	if published.Load() {
@@ -762,7 +770,7 @@ func TestHomeConfigWorkerRetriesStageFailureForSameQueuedConfig(t *testing.T) {
 		service.runHomeConfigWorker(lifetimeCtx, context.Background(), 1, client, executionregistry.New(), queue, ready, &published, &cancelBound)
 	}()
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(registryTestWaitTimeout)
 	for time.Now().Before(deadline) {
 		service.cfgMu.RLock()
 		strategy := service.cfg.Routing.Strategy
@@ -771,7 +779,7 @@ func TestHomeConfigWorkerRetriesStageFailureForSameQueuedConfig(t *testing.T) {
 			cancelLifetime()
 			select {
 			case <-workerDone:
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				t.Fatal("config worker did not stop after cancellation")
 			}
 			return
@@ -795,6 +803,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 	allowAck := make(chan struct{})
 	stop := make(chan struct{})
 	serverDone := make(chan struct{})
+	overlayCloses := &overlayCloseGuard{}
 	go func() {
 		defer close(serverDone)
 		for {
@@ -802,7 +811,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 			if errAccept != nil {
 				return
 			}
-			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop)
+			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop, overlayCloses)
 		}
 	}()
 	t.Cleanup(func() {
@@ -862,7 +871,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 	close(allowAck)
 	select {
 	case <-freshCommandProbe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("subscription ACK did not rebuild and probe a fresh command connection")
 	}
 	for name, observed := range map[string]<-chan struct{}{
@@ -871,21 +880,21 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 	} {
 		select {
 		case <-observed:
-		case <-time.After(time.Second):
+		case <-time.After(registryTestWaitTimeout):
 			t.Fatalf("ready Home lifetime did not stage %s after subscription ACK and fresh command probe", name)
 		}
 	}
 	for range 2 {
 		select {
 		case <-pluginStatus:
-		case <-time.After(time.Second):
+		case <-time.After(registryTestWaitTimeout):
 			t.Fatal("ready Home lifetime did not flush staged plugin reports")
 		}
 	}
 	if gotDeletes := deletes.Load(); gotDeletes != 1 {
 		t.Fatalf("ready Home lifetime executed %d plugin deletes, want 1", gotDeletes)
 	}
-	if waitForServiceRegistry(t, service, time.Second) == nil || home.Current() == nil {
+	if waitForServiceRegistry(t, service, registryTestWaitTimeout) == nil || home.Current() == nil {
 		t.Fatal("subscription ACK did not expose the Home client and registry")
 	}
 }
@@ -941,7 +950,7 @@ func TestServiceDiscardsStalePreACKPluginWork(t *testing.T) {
 	service.startHomeSubscriber(ctx)
 	select {
 	case <-firstSubscribed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscriber did not stage plugin work before ACK")
 	}
 
@@ -952,26 +961,26 @@ func TestServiceDiscardsStalePreACKPluginWork(t *testing.T) {
 	}()
 	select {
 	case <-secondSubscribed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement subscriber did not reach subscription ACK")
 	}
 	if got := pluginWrites.Load(); got != 0 {
 		t.Fatalf("stale pre-ACK lifetime flushed %d plugin reports", got)
 	}
 	close(allowSecondAck)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(registryTestWaitTimeout)
 	for pluginWrites.Load() != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if got := pluginWrites.Load(); got != 1 {
 		t.Fatalf("replacement lifetime plugin reports = %d, want 1", got)
 	}
-	if waitForServiceRegistry(t, service, time.Second) == nil {
+	if waitForServiceRegistry(t, service, registryTestWaitTimeout) == nil {
 		t.Fatal("replacement subscription did not expose a ready registry")
 	}
 	select {
 	case <-replaced:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement subscriber did not finish setup")
 	}
 }
@@ -1013,10 +1022,10 @@ func TestServiceExplicitReplacementDrainsPendingAndScopeBeforeStartingNewLifetim
 	service.startHomeSubscriber(ctx)
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1045,7 +1054,7 @@ func TestServiceExplicitReplacementDrainsPendingAndScopeBeforeStartingNewLifetim
 	}()
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("explicit replacement did not start draining the active scope")
 	}
 	select {
@@ -1056,12 +1065,12 @@ func TestServiceExplicitReplacementDrainsPendingAndScopeBeforeStartingNewLifetim
 	pending.End()
 	select {
 	case <-replaced:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("explicit replacement did not finish after pending dispatch ended")
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("new subscriber did not start after successful drain")
 	}
 }
@@ -1103,13 +1112,13 @@ func TestServiceReplacementWaitsForBlockedDrainSupervisorExit(t *testing.T) {
 	service.startHomeSubscriber(ctx)
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
 	service.homeLifecycleMu.Lock()
 	firstDone := service.homeSupervisor.done
 	service.homeLifecycleMu.Unlock()
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1138,7 +1147,7 @@ func TestServiceReplacementWaitsForBlockedDrainSupervisorExit(t *testing.T) {
 	}()
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement did not begin draining the active scope")
 	}
 	select {
@@ -1152,17 +1161,17 @@ func TestServiceReplacementWaitsForBlockedDrainSupervisorExit(t *testing.T) {
 	pending.End()
 	select {
 	case <-firstDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("old supervisor did not exit after drain completed")
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement subscriber did not start after old supervisor exit")
 	}
 	select {
 	case <-replaced:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("replacement start did not return")
 	}
 }
@@ -1207,10 +1216,10 @@ func TestServiceExplicitReplacementCancelsRunWhenDrainTimesOut(t *testing.T) {
 	service.startHomeSubscriber(serviceCtx)
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1232,12 +1241,12 @@ func TestServiceExplicitReplacementCancelsRunWhenDrainTimesOut(t *testing.T) {
 	go service.startHomeSubscriber(serviceCtx)
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("explicit replacement did not start draining the blocking scope")
 	}
 	select {
 	case <-serviceCtx.Done():
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("explicit replacement did not cancel the Service run after drain timeout")
 	}
 	select {
@@ -1301,10 +1310,10 @@ func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t 
 
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	firstRegistry := waitForServiceRegistry(t, service, time.Second)
+	firstRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	if home.Current() == nil {
 		t.Fatal("first client was not exposed after subscription ACK")
 	}
@@ -1312,7 +1321,7 @@ func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t 
 	close(loseFirst)
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("second subscription did not start after heartbeat loss")
 	}
 	service.homeMu.Lock()
@@ -1324,7 +1333,7 @@ func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t 
 	}
 
 	close(allowSecondAck)
-	secondRegistry := waitForServiceRegistry(t, service, time.Second)
+	secondRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	if secondRegistry != firstRegistry {
 		t.Fatal("heartbeat failover replaced the execution registry")
 	}
@@ -1371,10 +1380,10 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	service.startHomeSubscriber(ctx)
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	firstRegistry := waitForServiceRegistry(t, service, time.Second)
+	firstRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := firstRegistry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1403,7 +1412,7 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	}
 	select {
 	case <-finalSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("subscriber did not retry after pre-ACK rejections")
 	}
 	service.homeMu.Lock()
@@ -1415,7 +1424,7 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	}
 
 	close(allowFinalAck)
-	secondRegistry := waitForServiceRegistry(t, service, time.Second)
+	secondRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	if secondRegistry != firstRegistry || home.Current() == nil {
 		t.Fatal("new Home lifetime was not exposed only after its subscription ACK")
 	}
@@ -1476,10 +1485,10 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1506,7 +1515,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
@@ -1516,7 +1525,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 		t.Fatal("registry was exposed before the replacement ACK")
 	}
 	close(allowSecondAck)
-	if nextRegistry := waitForServiceRegistry(t, service, time.Second); nextRegistry != registry {
+	if nextRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout); nextRegistry != registry {
 		t.Fatal("heartbeat failover replaced the registry containing the active scope")
 	}
 	select {
@@ -1570,10 +1579,10 @@ func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
 
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pendingRetry, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1606,7 +1615,7 @@ func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
 		t.Fatal("ready Home client is unavailable")
 	}
 	close(loseFirst)
-	deadline := time.After(time.Second)
+	deadline := time.After(registryTestWaitTimeout)
 	for {
 		errRelease := client.PushConcurrencyRelease(context.Background(), home.ConcurrencyReleaseFrame{CredentialID: "cred-a", Model: "model-a", ReleaseSeq: 1})
 		if errors.Is(errRelease, home.ErrDispatchFenced) {
@@ -1627,7 +1636,7 @@ func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
 
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("shutdown did not drain the detached execution registry")
 	}
 	select {
@@ -1635,7 +1644,7 @@ func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
 		if errShutdown != nil {
 			t.Fatalf("Shutdown() error = %v", errShutdown)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Shutdown() did not complete after draining the detached registry")
 	}
 }
@@ -1681,10 +1690,10 @@ func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
 
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1711,12 +1720,12 @@ func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
 	client.AbortAmbiguousDispatch()
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("ambiguous dispatch did not drain the active registry")
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("subscriber did not retry after ambiguous dispatch drain")
 	}
 	service.homeMu.Lock()
@@ -1727,7 +1736,7 @@ func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
 	}
 
 	close(allowSecondAck)
-	nextRegistry := waitForServiceRegistry(t, service, time.Second)
+	nextRegistry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	if nextRegistry == registry {
 		t.Fatal("ambiguous dispatch reused the drained execution registry")
 	}
@@ -1829,7 +1838,7 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationWithoutDrainingRegi
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	service.startHomeSubscriber(ctx)
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1850,18 +1859,18 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationWithoutDrainingRegi
 	close(update)
 	select {
 	case <-statusStarted:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("updated config did not enter blocked finalization")
+	}
+	select {
+	case <-secondConfig:
+	case <-time.After(registryTestWaitTimeout):
+		t.Fatal("subscriber did not retry after heartbeat loss")
 	}
 	select {
 	case <-resourceClosed:
 		t.Fatal("heartbeat loss drained the active execution")
 	case <-time.After(200 * time.Millisecond):
-	}
-	select {
-	case <-secondConfig:
-	case <-time.After(time.Second):
-		t.Fatal("subscriber did not retry after heartbeat loss")
 	}
 	service.homeMu.Lock()
 	currentRegistry := service.homeRegistry
@@ -1906,7 +1915,7 @@ func TestServiceConfigWorkerFinalizesRapidUpdatesInOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	service.startHomeSubscriber(ctx)
-	waitForServiceRegistry(t, service, time.Second)
+	waitForServiceRegistry(t, service, registryTestWaitTimeout)
 	close(updates)
 
 	gotTaskIDs := make([]uint, 0, 2)
@@ -1916,7 +1925,7 @@ func TestServiceConfigWorkerFinalizesRapidUpdatesInOrder(t *testing.T) {
 			if report.TaskID != 0 {
 				gotTaskIDs = append(gotTaskIDs, report.TaskID)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(registryTestWaitTimeout):
 			t.Fatal("rapid config updates did not finalize all ordered task work")
 		}
 	}
@@ -1950,7 +1959,7 @@ func serveBlockedFinalizationConnection(conn net.Conn, configRequests, statusWri
 				_, _ = io.WriteString(conn, "-ERR unavailable\r\n")
 				return
 			}
-			writeRegistryTestConfig(conn, "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 100ms\n  cpa-cancel-bound: 100ms\n")
+			writeRegistryTestConfig(conn, "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 1s\n  cpa-cancel-bound: 100ms\n")
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "plugin-tasks":
 			_, _ = io.WriteString(conn, "$-1\r\n")
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "plugin-sync":
@@ -1980,7 +1989,7 @@ func serveBlockedFinalizationConnection(conn net.Conn, configRequests, statusWri
 			}
 			select {
 			case <-update:
-				writeRegistryTestMessage(conn, "credential-concurrency:\n  lifecycle-config-revision: 2\n  cpa-heartbeat-timeout: 100ms\n  cpa-cancel-bound: 100ms\nplugins:\n  enabled: true\n")
+				writeRegistryTestMessage(conn, "credential-concurrency:\n  lifecycle-config-revision: 2\n  cpa-heartbeat-timeout: 1s\n  cpa-cancel-bound: 100ms\nplugins:\n  enabled: true\n")
 			case <-stop:
 				return
 			}
@@ -2169,18 +2178,18 @@ func TestServiceReusesHomeLogForwarderAcrossReconnects(t *testing.T) {
 	t.Cleanup(cancel)
 	service.startHomeSubscriber(ctx)
 	waitForHomeLogForwarderACK(t, acks)
-	first := waitForServiceHomeClient(t, service, time.Second)
+	first := waitForServiceHomeClient(t, service, registryTestWaitTimeout)
 
 	service.startHomeSubscriber(ctx)
 	waitForHomeLogForwarderACK(t, acks)
-	second := waitForServiceHomeClient(t, service, time.Second)
+	second := waitForServiceHomeClient(t, service, registryTestWaitTimeout)
 	if second == first {
 		t.Fatal("first reconnect reused the previous Home client")
 	}
 
 	service.startHomeSubscriber(ctx)
 	waitForHomeLogForwarderACK(t, acks)
-	third := waitForServiceHomeClient(t, service, time.Second)
+	third := waitForServiceHomeClient(t, service, registryTestWaitTimeout)
 	if third == second {
 		t.Fatal("second reconnect reused the previous Home client")
 	}
@@ -2209,7 +2218,7 @@ func waitForHomeLogForwarderACK(t *testing.T, acks <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-acks:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Home subscription was not acknowledged")
 	}
 }
@@ -2303,7 +2312,7 @@ func serveHomeLogForwarderReconnectConnection(conn net.Conn, acks chan<- struct{
 
 func waitForPublisherReplacementFrame(t *testing.T, frames <-chan home.InFlightSnapshotFrame, barrierRevision int64) home.InFlightSnapshotFrame {
 	t.Helper()
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(registryTestWaitTimeout)
 	defer timer.Stop()
 	for {
 		select {
@@ -2373,7 +2382,7 @@ func servePublisherReplacementConnection(conn net.Conn, configRequests *atomic.I
 			select {
 			case <-stop:
 				return
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				return
 			}
 		case len(args) >= 3 && strings.EqualFold(args[0], "LPUSH") && args[1] == "in-flight-snapshot":
@@ -2431,7 +2440,7 @@ func servePreACKReplacementConnection(conn net.Conn, configRequests *atomic.Int3
 			select {
 			case <-stop:
 				return
-			case <-time.After(time.Second):
+			case <-time.After(registryTestWaitTimeout):
 				return
 			}
 		default:
@@ -2522,7 +2531,7 @@ func serveStalePreACKPluginConnection(conn net.Conn, subscriptions *atomic.Int32
 				return
 			}
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "config":
-			payload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 100ms\n  cpa-cancel-bound: 100ms\nplugins:\n  enabled: true\n"
+			payload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 1s\n  cpa-cancel-bound: 100ms\nplugins:\n  enabled: true\n"
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
 			}
@@ -2572,7 +2581,16 @@ func serveStalePreACKPluginConnection(conn net.Conn, subscriptions *atomic.Int32
 	}
 }
 
-func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, allowAck chan struct{}, stop chan struct{}) {
+// overlayCloseGuard serializes the mock's shared-channel closes. The mock runs
+// one handler goroutine per connection, so a client reconnect can re-trigger
+// the same close and a bare close() would panic.
+type overlayCloseGuard struct {
+	pluginSync        sync.Once
+	pluginTasks       sync.Once
+	freshCommandProbe sync.Once
+}
+
+func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, allowAck chan struct{}, stop chan struct{}, guard *overlayCloseGuard) {
 	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
@@ -2594,7 +2612,7 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 			if home.Current() != nil {
 				return
 			}
-			close(pluginSync)
+			guard.pluginSync.Do(func() { close(pluginSync) })
 			payload := fmt.Sprintf(`{"schema_version":1,"expires_at":%q,"items":[]}`, time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
@@ -2610,13 +2628,13 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 				return
 			}
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "plugin-tasks":
-			close(pluginTasks)
+			guard.pluginTasks.Do(func() { close(pluginTasks) })
 			payload := `[{"id":1,"operation":"delete","plugin_id":"plugin-a"}]`
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
 			}
 		case len(args) > 0 && strings.EqualFold(args[0], "PING"):
-			close(freshCommandProbe)
+			guard.freshCommandProbe.Do(func() { close(freshCommandProbe) })
 			if _, errWrite := io.WriteString(conn, "+PONG\r\n"); errWrite != nil {
 				return
 			}
@@ -2949,7 +2967,7 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 	}()
 	select {
 	case <-firstStarted:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Home config runtime apply did not start")
 	}
 
@@ -2966,7 +2984,7 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 	close(releaseFirst)
 	select {
 	case <-watcherDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("watcher runtime apply did not finish")
 	}
 	appliedMu.Lock()
@@ -2978,7 +2996,7 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 	cancelLifetime()
 	select {
 	case <-workerDone:
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWaitTimeout):
 		t.Fatal("Home config worker did not stop")
 	}
 }

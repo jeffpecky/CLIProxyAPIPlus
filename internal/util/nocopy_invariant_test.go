@@ -22,9 +22,12 @@ var inPlaceSJSONAllowlist = map[string]struct{}{}
 // build and tool dirs are excluded because they hold cloned third-party or
 // generated Go sources (build output, caches, temporary GOPATH/module trees)
 // that must not be treated as product code governed by these invariants.
+// The .kilo dir holds agent git worktrees containing a full duplicate copy of
+// the source tree, so scanning it would report every finding twice.
 var skippedWalkDirs = map[string]struct{}{
 	".git": {}, "vendor": {}, "node_modules": {}, "testdata": {},
 	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {},
+	".kilo": {},
 }
 
 // forEachSourceFile visits every non-test Go file in the repository.
