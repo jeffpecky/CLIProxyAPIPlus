@@ -19,9 +19,10 @@ import (
 
 const (
 	// Headroom's Python startup imports (transformers, openai, fastapi, mcp,
-	// tiktoken) routinely take 60-75s on Windows before the proxy binds its
-	// port, so the readiness budget must cover a cold start with AV scanning.
-	headroomStartupTimeout = 180 * time.Second
+	// tiktoken) take 60-140s on Windows before the proxy binds its port, so
+	// the readiness budget must cover a cold start with AV scanning. The value
+	// stays below the 300s fetch timeout used by the ccs management proxy.
+	headroomStartupTimeout = 240 * time.Second
 	headroomPollInterval   = 200 * time.Millisecond
 	headroomLogTailLines   = 20
 )
