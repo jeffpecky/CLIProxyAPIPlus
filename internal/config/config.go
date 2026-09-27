@@ -181,6 +181,9 @@ type Config struct {
 	// OpenCodeGoKey defines OpenCode Go subscription API key configurations.
 	OpenCodeGoKey []CodexKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
 
+	// OllamaLocalKey defines local Ollama server configurations.
+	OllamaLocalKey []OllamaLocalKey `yaml:"ollama-local-api-key" json:"ollama-local-api-key"`
+
 	// AmpCode contains the fork-maintained Amp CLI routing and management configuration.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 

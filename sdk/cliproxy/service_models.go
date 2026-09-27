@@ -206,6 +206,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "ollama-local":
+		if entry := s.resolveConfigOllamaLocalKey(a); entry != nil {
+			excluded = entry.ExcludedModels
+			if len(entry.Models) > 0 {
+				models = buildConfigModels(entry.Models, "ollama-local", "openai")
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -576,6 +584,34 @@ func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
+}
+
+func (s *Service) resolveConfigOllamaLocalKey(auth *coreauth.Auth) *config.OllamaLocalKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigOllamaLocalStyleKey(auth, s.cfg.OllamaLocalKey)
+}
+
+func resolveConfigOllamaLocalStyleKey(auth *coreauth.Auth, entries []config.OllamaLocalKey) *config.OllamaLocalKey {
+	if auth == nil {
+		return nil
+	}
+	var attrBase string
+	if auth.Attributes != nil {
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
+		return entry
+	}
+	for i := range entries {
+		entry := &entries[i]
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
 }
 
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {

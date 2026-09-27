@@ -586,6 +586,27 @@ type CodexKey struct {
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
 
+// OllamaLocalKey defines a local Ollama server endpoint for chat completions.
+type OllamaLocalKey struct {
+	// BaseURL is the Ollama server URL (default http://localhost:11434).
+	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// Priority controls selection preference when multiple entries exist.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// Prefix optionally namespaces models for this credential.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []CodexModel `yaml:"models" json:"models"`
+
+	// ExcludedModels lists model name patterns that should not be routed to this credential.
+	ExcludedModels []string `yaml:"excluded-models" json:"excluded-models"`
+}
+
 func (k CodexKey) GetAPIKey() string { return k.APIKey }
 
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }

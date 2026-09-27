@@ -458,6 +458,18 @@ nonstream-keepalive-interval: 0
 #     excluded-models:
 #       - "mimo-v2.5"         # exclude specific models (exact match)
 
+# Ollama Local API keys
+# Routes self-hosted Ollama server. No API key required.
+# proxy translates OpenAI format Ollama's native /api/chat format.
+# ollama-local-api-key:
+#   - base-url: "http://localhost:11434"  # default; change if Ollama runs elsewhere
+#     models:
+#       - name: "llama3.1"       # upstream Ollama model name
+#         alias: "llama-local"   # client alias
+#         display-name: "Llama 3.1 (Local)"
+#     excluded-models:
+#       - "codestral*"
+
 # xAI API keys
 # Uses the native xAI executor, including its Responses namespace-tool handling.
 # xai-api-key:

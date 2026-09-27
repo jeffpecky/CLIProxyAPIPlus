@@ -211,6 +211,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"kimi",
 		"xai",
 		"openai-compatibility",
+		"ollama-local",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
 	for _, provider := range providers {
@@ -328,6 +329,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
+	case "ollama-local":
+		s.coreManager.RegisterExecutor(executor.NewOllamaLocalExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

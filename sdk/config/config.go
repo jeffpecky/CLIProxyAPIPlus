@@ -35,6 +35,7 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 type KiroRateLimitConfig = internalconfig.KiroRateLimitConfig
+type OllamaLocalKey = internalconfig.OllamaLocalKey
 
 type TLS = internalconfig.TLSConfig
 
