@@ -213,6 +213,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildConfigModels(entry.Models, "ollama-local", "openai")
 			}
 		}
+		if len(models) == 0 {
+			models = executor.FetchOllamaLocalModels(ctx, a, s.cfg)
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config

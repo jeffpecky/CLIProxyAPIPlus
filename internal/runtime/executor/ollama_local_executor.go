@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -237,6 +238,83 @@ func (e *OllamaLocalExecutor) HttpRequest(_ context.Context, _ *cliproxyauth.Aut
 	return nil, statusErr{code: http.StatusNotImplemented, msg: "HTTP proxy not supported for ollama-local"}
 }
 
+// FetchOllamaLocalModels retrieves the installed model list from the Ollama
+// server's /api/tags endpoint. It returns nil when the server cannot be
+// reached or reports an error so callers can fall back to configured models.
+func FetchOllamaLocalModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tagsURL := strings.TrimRight(ollamaLocalBaseURL(auth), "/") + "/api/tags"
+
+	// Bound discovery latency so a slow or unreachable server cannot stall
+	// model registration (mirrors the other dynamic model fetchers).
+	fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, errReq := http.NewRequestWithContext(fetchCtx, http.MethodGet, tagsURL, nil)
+	if errReq != nil {
+		log.Warnf("ollama local: build model list request: %v", errReq)
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := helps.NewProxyAwareHTTPClient(fetchCtx, cfg, auth, 0)
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Warnf("ollama local: model list fetch failed: %v", errDo)
+		return nil
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Warnf("ollama local: close model list response: %v", errClose)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		log.Warnf("ollama local: model list returned %d: %s", resp.StatusCode, truncate(string(b), 300))
+		return nil
+	}
+	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		log.Warnf("ollama local: read model list response: %v", errRead)
+		return nil
+	}
+
+	entries := gjson.GetBytes(body, "models")
+	if !entries.IsArray() {
+		log.Warn("ollama local: model list response missing models array")
+		return nil
+	}
+	now := time.Now().Unix()
+	list := entries.Array()
+	models := make([]*registry.ModelInfo, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, entry := range list {
+		name := strings.TrimSpace(entry.Get("name").String())
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		models = append(models, &registry.ModelInfo{
+			ID:          name,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "ollama-local",
+			Type:        "openai",
+			DisplayName: name,
+		})
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	return models
+}
+
 func convertOpenAIToOllama(modelName string, rawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{}`)
@@ -333,8 +411,9 @@ func ollamaNDJSONToOpenAIStream(ctx context.Context, scanner *bufio.Scanner, out
 				"usage":   usage,
 			}
 			payload, _ := json.Marshal(donePayload)
-			out <- cliproxyexecutor.StreamChunk{Payload: append([]byte("data: "), append(payload, '\n', '\n')...)}
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			// The handler frames each chunk as "data: %s" and appends
+			// "data: [DONE]" when the chunk channel closes; emit raw JSON only.
+			out <- cliproxyexecutor.StreamChunk{Payload: append(payload, '\n', '\n')}
 			return
 		}
 
@@ -365,7 +444,7 @@ func ollamaNDJSONToOpenAIStream(ctx context.Context, scanner *bufio.Scanner, out
 			},
 		}
 		payload, _ := json.Marshal(chatChunk)
-		out <- cliproxyexecutor.StreamChunk{Payload: append([]byte("data: "), append(payload, '\n', '\n')...)}
+		out <- cliproxyexecutor.StreamChunk{Payload: append(payload, '\n', '\n')}
 	}
 }
 

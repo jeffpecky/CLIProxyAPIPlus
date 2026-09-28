@@ -68,6 +68,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenRouterKeys(ctx)...)
 	// OpenCode Go API Keys
 	out = append(out, s.synthesizeOpenCodeGoKeys(ctx)...)
+	// Ollama Local endpoints
+	out = append(out, s.synthesizeOllamaLocalKeys(ctx)...)
 
 	return out, nil
 }
@@ -247,6 +249,51 @@ var defaultCodexStyleBaseURLs = map[string]string{
 	"nvidia":      "https://integrate.api.nvidia.com/v1",
 	"openrouter":  "https://openrouter.ai/api/v1",
 	"opencode-go": "https://opencode.ai/zen/go/v1",
+}
+
+const defaultOllamaLocalBaseURL = "http://localhost:11434"
+
+// synthesizeOllamaLocalKeys creates Auth entries for self-hosted Ollama
+// servers. These endpoints are keyless: the base URL acts as the credential.
+func (s *ConfigSynthesizer) synthesizeOllamaLocalKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.OllamaLocalKey))
+	for i := range cfg.OllamaLocalKey {
+		entry := cfg.OllamaLocalKey[i]
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			baseURL = defaultOllamaLocalBaseURL
+		}
+		id, token := idGen.Next("ollama-local:apikey", baseURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:ollama-local[%s]", token),
+			"base_url":     baseURL,
+			"config_index": strconv.Itoa(i),
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "ollama-local",
+			Label:      "ollama-local-apikey",
+			Prefix:     strings.TrimSpace(entry.Prefix),
+			Status:     coreauth.StatusActive,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, coreauth.AuthKindAPIKey)
+		out = append(out, a)
+	}
+	return out
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {

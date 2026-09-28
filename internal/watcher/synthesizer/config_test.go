@@ -1099,3 +1099,69 @@ func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_OllamaLocalKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	weight := 3
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OllamaLocalKey: []config.OllamaLocalKey{
+				{
+					BaseURL:        "http://100.102.114.7:11434/",
+					Prefix:         "local",
+					Priority:       5,
+					Weight:         &weight,
+					ExcludedModels: []string{"bad*"},
+				},
+				{},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	a := auths[0]
+	if a.Provider != "ollama-local" {
+		t.Errorf("expected provider ollama-local, got %s", a.Provider)
+	}
+	if a.Label != "ollama-local-apikey" {
+		t.Errorf("expected label ollama-local-apikey, got %s", a.Label)
+	}
+	if a.Prefix != "local" {
+		t.Errorf("expected prefix local, got %q", a.Prefix)
+	}
+	if got := a.Attributes["base_url"]; got != "http://100.102.114.7:11434/" {
+		t.Errorf("expected base_url http://100.102.114.7:11434/, got %q", got)
+	}
+	if got := a.Attributes[coreauth.AttributeConfigIndex]; got != "0" {
+		t.Errorf("expected config_index 0, got %q", got)
+	}
+	if got := a.Attributes[coreauth.AttributeAuthKind]; got != coreauth.AuthKindAPIKey {
+		t.Errorf("expected auth_kind %s, got %q", coreauth.AuthKindAPIKey, got)
+	}
+	if got := a.Attributes["priority"]; got != "5" {
+		t.Errorf("expected priority 5, got %q", got)
+	}
+	if got := a.Attributes[coreauth.AttributeWeight]; got != "3" {
+		t.Errorf("expected weight 3, got %q", got)
+	}
+	if got := a.Attributes["excluded_models"]; !strings.Contains(got, "bad") {
+		t.Errorf("expected excluded_models to contain bad*, got %q", got)
+	}
+	if !strings.HasPrefix(a.ID, "ollama-local:apikey:") {
+		t.Errorf("unexpected auth id %q", a.ID)
+	}
+
+	// Entries without a base URL fall back to the localhost default.
+	if got := auths[1].Attributes["base_url"]; got != defaultOllamaLocalBaseURL {
+		t.Errorf("expected default base_url %q, got %q", defaultOllamaLocalBaseURL, got)
+	}
+}

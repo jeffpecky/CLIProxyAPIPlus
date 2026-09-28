@@ -1,11 +1,18 @@
 package executor
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 func TestConvertOpenAIToOllama_BasicMessageConversion(t *testing.T) {
@@ -180,5 +187,91 @@ func TestOllamaLocalBaseURL_EmptyAttribute(t *testing.T) {
 	got := ollamaLocalBaseURL(a)
 	if got != "http://localhost:11434" {
 		t.Errorf("URL = %q, want default %q", got, "http://localhost:11434")
+	}
+}
+
+func TestFetchOllamaLocalModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[
+			{"name":"llama3.2:latest","details":{"family":"llama"}},
+			{"name":"qwen2.5:7b","details":{"family":"qwen3"}},
+			{"name":"llama3.2:latest","details":{"family":"llama"}},
+			{"name":"","details":{}}
+		]}`))
+	}))
+	defer server.Close()
+
+	a := &auth.Auth{Attributes: map[string]string{"base_url": server.URL}}
+	models := FetchOllamaLocalModels(context.Background(), a, nil)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].ID != "llama3.2:latest" || models[1].ID != "qwen2.5:7b" {
+		t.Errorf("unexpected model IDs: %q, %q", models[0].ID, models[1].ID)
+	}
+	for _, m := range models {
+		if m.OwnedBy != "ollama-local" || m.Type != "openai" {
+			t.Errorf("model %q: owned_by=%q type=%q", m.ID, m.OwnedBy, m.Type)
+		}
+		if m.Object != "model" || m.DisplayName != m.ID {
+			t.Errorf("model %q: object=%q display_name=%q", m.ID, m.Object, m.DisplayName)
+		}
+	}
+}
+
+func TestFetchOllamaLocalModels_ErrorStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer server.Close()
+
+	a := &auth.Auth{Attributes: map[string]string{"base_url": server.URL}}
+	if models := FetchOllamaLocalModels(context.Background(), a, nil); models != nil {
+		t.Errorf("expected nil models on error status, got %d", len(models))
+	}
+}
+
+func TestFetchOllamaLocalModels_UnreachableServer(t *testing.T) {
+	a := &auth.Auth{Attributes: map[string]string{"base_url": "http://127.0.0.1:1"}}
+	if models := FetchOllamaLocalModels(context.Background(), a, nil); models != nil {
+		t.Errorf("expected nil models when server unreachable, got %d", len(models))
+	}
+}
+
+func TestOllamaNDJSONToOpenAIStream_RawJSONFraming(t *testing.T) {
+	ndjson := strings.Join([]string{
+		`{"model":"m","message":{"role":"assistant","content":"Hi"},"done":false}`,
+		`{"model":"m","prompt_eval_count":10,"eval_count":5,"done":true}`,
+	}, "\n") + "\n"
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
+	ollamaNDJSONToOpenAIStream(context.Background(), bufio.NewScanner(strings.NewReader(ndjson)), out)
+	close(out)
+
+	var payloads []string
+	for chunk := range out {
+		payloads = append(payloads, string(chunk.Payload))
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("payloads = %d, want 2 (delta + usage)", len(payloads))
+	}
+	for i, body := range payloads {
+		if strings.HasPrefix(body, "data: ") {
+			t.Errorf("payload[%d] has data: prefix; handler adds it: %q", i, body)
+		}
+		if strings.Contains(body, "[DONE]") {
+			t.Errorf("payload[%d] contains [DONE]; handler emits it on channel close: %q", i, body)
+		}
+		if !strings.HasPrefix(body, "{") {
+			t.Errorf("payload[%d] = %q, want raw JSON", i, body)
+		}
+	}
+	usage := gjson.Get(payloads[1], "usage")
+	if usage.Get("prompt_tokens").Int() != 10 || usage.Get("completion_tokens").Int() != 5 || usage.Get("total_tokens").Int() != 15 {
+		t.Errorf("usage = %s, want 10/5/15", usage.Raw)
 	}
 }
