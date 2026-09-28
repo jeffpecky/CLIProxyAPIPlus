@@ -233,7 +233,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
-	exec := manager.executors[auth.Provider]
+	exec := manager.executors[executorKeyFromAuth(auth)]
 	manager.mu.RUnlock()
 
 	if !shouldSchedule {
@@ -344,6 +344,18 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	}
 
 	if auth.AuthKind() == AuthKindAPIKey {
+		return time.Time{}, false
+	}
+
+	// Kiro tokens are refreshed by the dedicated kiro background refresher
+	// (internal/auth/kiro); the generic loop must not race it.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "kiro") {
+		return time.Time{}, false
+	}
+
+	// Without a refresh credential the executor cannot refresh; skip scheduling
+	// so the loop does not retry and fail every cycle.
+	if !authHasRefreshCredential(auth) {
 		return time.Time{}, false
 	}
 

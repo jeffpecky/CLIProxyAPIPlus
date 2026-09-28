@@ -77,8 +77,9 @@ func TestManager_Remove_UnschedulesAutoRefresh(t *testing.T) {
 		ID:       "remove-refresh-auth",
 		Provider: "provider-lead-expiry",
 		Metadata: map[string]any{
-			"email":      "x@example.com",
-			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+			"email":         "x@example.com",
+			"expires_at":    time.Now().Add(time.Hour).Format(time.RFC3339),
+			"refresh_token": "rt.test",
 		},
 	}
 	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {

@@ -47,8 +47,9 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 		Disabled: true,
 		Status:   StatusDisabled,
 		Metadata: map[string]any{
-			"email":      "x@example.com",
-			"expires_at": expiry.Format(time.RFC3339),
+			"email":         "x@example.com",
+			"expires_at":    expiry.Format(time.RFC3339),
+			"refresh_token": "rt.test",
 		},
 	}
 
@@ -77,7 +78,10 @@ func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 		ID:               "a1",
 		Provider:         "test",
 		NextRefreshAfter: nextAfter,
-		Metadata:         map[string]any{"email": "x@example.com"},
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"refresh_token": "rt.test",
+		},
 	}
 	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
 	if !ok {
@@ -98,6 +102,7 @@ func TestNextRefreshCheckAt_PreferredInterval_PicksEarliestCandidate(t *testing.
 		Metadata: map[string]any{
 			"email":                    "x@example.com",
 			"expires_at":               expiry.Format(time.RFC3339),
+			"refresh_token":            "rt.test",
 			"refresh_interval_seconds": 900, // 15m
 		},
 	}
@@ -124,8 +129,9 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 		ID:       "a1",
 		Provider: "provider-lead-expiry",
 		Metadata: map[string]any{
-			"email":      "x@example.com",
-			"expires_at": expiry.Format(time.RFC3339),
+			"email":         "x@example.com",
+			"expires_at":    expiry.Format(time.RFC3339),
+			"refresh_token": "rt.test",
 		},
 	}
 
@@ -145,8 +151,11 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	auth := &Auth{
 		ID:       "a1",
 		Provider: "test",
-		Metadata: map[string]any{"email": "x@example.com"},
-		Runtime:  testRefreshEvaluator{},
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"refresh_token": "rt.test",
+		},
+		Runtime: testRefreshEvaluator{},
 	}
 	got, ok := nextRefreshCheckAt(now, auth, interval)
 	if !ok {
@@ -155,5 +164,52 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	want := now.Add(interval)
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+}
+
+func TestNextRefreshCheckAt_KiroExcludedFromGenericLoop(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	expiry := now.Add(time.Hour)
+	lead := 10 * time.Minute
+	// Register a lead so the exclusion is proven to come from the kiro guard,
+	// not from a missing refresh-lead registration.
+	setRefreshLeadFactory(t, "kiro", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"expires_at":    expiry.Format(time.RFC3339),
+			"refresh_token": "rt.test",
+		},
+	}
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false: kiro is handled by its own refresher")
+	}
+}
+
+func TestNextRefreshCheckAt_MissingRefreshCredentialUnschedule(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	expiry := now.Add(time.Hour)
+	lead := 10 * time.Minute
+	setRefreshLeadFactory(t, "no-refresh-credential", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "no-refresh-credential",
+		Metadata: map[string]any{
+			"email":      "x@example.com",
+			"expires_at": expiry.Format(time.RFC3339),
+		},
+	}
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false without a refresh_token")
 	}
 }
