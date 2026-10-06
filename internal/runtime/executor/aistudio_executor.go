@@ -127,6 +127,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -148,7 +149,11 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	customHeaderReq := &http.Request{Header: wsReq.Headers}
+	if ctx != nil {
+		customHeaderReq = customHeaderReq.WithContext(ctx)
+	}
+	util.ApplyCustomHeadersFromAttrs(customHeaderReq, attrs, opts.Headers)
 	hookReq, errHookReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wsReq.Body))
 	if errHookReq != nil {
 		return resp, errHookReq
@@ -193,6 +198,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if wsResp.Status < 200 || wsResp.Status >= 300 {
 		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
 	}
+	reporter.ObserveResponseModel(wsResp.Body)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(wsResp.Body))
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
@@ -209,6 +215,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -230,7 +237,11 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	customHeaderReq := &http.Request{Header: wsReq.Headers}
+	if ctx != nil {
+		customHeaderReq = customHeaderReq.WithContext(ctx)
+	}
+	util.ApplyCustomHeadersFromAttrs(customHeaderReq, attrs, opts.Headers)
 	hookReq, errHookReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(wsReq.Body))
 	if errHookReq != nil {
 		return nil, errHookReq
@@ -343,6 +354,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					reporter.MarkFirstResponseByte()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
+					reporter.ObserveResponseModel(event.Payload)
 					filtered := helps.FilterSSEUsageMetadata(event.Payload)
 					if detail, ok := helps.ParseGeminiStreamUsage(filtered); ok {
 						reporter.Publish(ctx, detail)
@@ -377,6 +389,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 						return false
 					}
 				}
+				reporter.ObserveResponseModel(event.Payload)
 				reporter.Publish(ctx, helps.ParseGeminiUsage(event.Payload))
 				return false
 			case wsrelay.MessageTypeError:
@@ -405,7 +418,15 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 // CountTokens counts tokens for the given request using the AI Studio API.
 func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	_, body, err := e.translateRequest(ctx, req, opts, false)
+	countReq := req
+	countMetadata := make(map[string]any, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		countMetadata[k] = v
+	}
+	countMetadata["action"] = "countTokens"
+	countReq.Metadata = countMetadata
+
+	_, body, err := e.translateRequest(ctx, countReq, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -517,7 +538,39 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 		action = "streamGenerateContent"
 	}
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
+	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
+	if action != "countTokens" {
+		payload = helps.EnsureGeminiTrailingUserContent(payload, "contents")
+	}
+	payload = normalizeAIStudioThinkingLevel(payload)
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+}
+
+// normalizeAIStudioThinkingLevel normalizes thinking levels to Google's canonical uppercase enum values.
+// The AI Studio upstream validates generationConfig.thinkingConfig.thinkingLevel case-sensitively
+// and rejects lowercase values with a 400 invalid argument error.
+func normalizeAIStudioThinkingLevel(payload []byte) []byte {
+	const path = "generationConfig.thinkingConfig.thinkingLevel"
+	level := gjson.GetBytes(payload, path)
+	if level.Type != gjson.String {
+		return payload
+	}
+
+	normalized := strings.ToUpper(level.String())
+	switch normalized {
+	case "MINIMAL", "LOW", "MEDIUM", "HIGH":
+	default:
+		return payload
+	}
+	if normalized == level.String() {
+		return payload
+	}
+
+	result, err := sjson.SetBytes(payload, path, normalized)
+	if err != nil {
+		return payload
+	}
+	return result
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {

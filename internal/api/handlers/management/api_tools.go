@@ -9,12 +9,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -34,6 +38,13 @@ var geminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
 }
+
+const (
+	antigravityOAuthClientIDEnv     = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
+	antigravityOAuthClientSecretEnv = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+)
+
+var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -70,7 +81,8 @@ type apiCallResponse struct {
 // Request JSON (supports both application/json and application/cbor):
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
-//     If omitted or not found, credential-specific proxy/token substitution is skipped.
+//     If omitted, credential-specific proxy selection is skipped.
+//     If "$TOKEN$" is present and the credential or token cannot be resolved, the request fails with HTTP 400.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - proxy_url (optional): Proxy used for this request. Supports HTTP, HTTPS, SOCKS5, SOCKS5H,
@@ -162,119 +174,132 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
-	headerTemplate := cloneStringMap(body.Header)
 
-	type callResult struct {
-		statusCode int
-		header     http.Header
-		body       []byte
-		auth       *coreauth.Auth
-		token      string
-		headers    map[string]string
+	reqHeaders := body.Header
+	if reqHeaders == nil {
+		reqHeaders = map[string]string{}
 	}
 
-	doCall := func(forceRefresh bool, failedAccessToken string) (*callResult, error) {
-		selectedAuth := auth
-		token := ""
-		var errToken error
-		if mapContainsValue(headerTemplate, "$TOKEN$") {
-			selectedAuth, token, errToken = h.resolveTokenForAuth(c.Request.Context(), selectedAuth, forceRefresh, failedAccessToken)
-			if selectedAuth != nil && token == "" {
-				if errToken != nil {
-					return nil, fmt.Errorf("auth token refresh failed: %w", errToken)
-				}
-				return nil, errors.New("auth token not found")
-			}
-		}
+	var hostOverride string
+	var token string
+	var tokenResolved bool
+	var tokenErr error
 
-		reqHeaders := cloneStringMap(headerTemplate)
-		for key, value := range reqHeaders {
-			if token != "" {
-				reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+	resolveToken := func() error {
+		if !tokenResolved {
+			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth, requestProxyURL)
+			tokenResolved = true
+		}
+		if token == "" {
+			if tokenErr != nil {
+				return errors.New("auth token refresh failed")
 			}
-		}
-		useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
-
-		var requestBody io.Reader
-		if body.Data != "" {
-			if useCBORPayload {
-				cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
-				if errEncode != nil {
-					return nil, fmt.Errorf("invalid json data for cbor content-type: %w", errEncode)
-				}
-				requestBody = bytes.NewReader(cborPayload)
-			} else {
-				requestBody = strings.NewReader(body.Data)
+			if authIndex != "" && auth == nil {
+				return errors.New("auth credential not found for auth_index")
 			}
+			return errors.New("auth token not found")
 		}
-
-		req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
-		if errNewRequest != nil {
-			return nil, fmt.Errorf("failed to build request: %w", errNewRequest)
-		}
-		for key, value := range reqHeaders {
-			if strings.EqualFold(key, "host") {
-				req.Host = strings.TrimSpace(value)
-				continue
-			}
-			req.Header.Set(key, value)
-		}
-
-		httpClient := &http.Client{Timeout: defaultAPICallTimeout}
-		httpClient.Transport = h.apiCallTransport(selectedAuth, requestProxyURL)
-		resp, errDo := httpClient.Do(req)
-		if errDo != nil {
-			return nil, errDo
-		}
-		respBody, errReadAll := io.ReadAll(resp.Body)
-		errClose := resp.Body.Close()
-		if errReadAll != nil {
-			return nil, errReadAll
-		}
-		if errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		return &callResult{
-			statusCode: resp.StatusCode,
-			header:     resp.Header,
-			body:       respBody,
-			auth:       selectedAuth,
-			token:      token,
-			headers:    reqHeaders,
-		}, nil
+		return nil
 	}
 
-	result, errCall := doCall(false, "")
-	if errCall != nil {
-		log.WithError(errCall).Debug("management APICall request failed")
+	for key, value := range reqHeaders {
+		if !strings.Contains(value, "$TOKEN$") {
+			continue
+		}
+		if errToken := resolveToken(); errToken != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errToken.Error()})
+			return
+		}
+		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+	}
+
+	if strings.Contains(body.Data, "$TOKEN$") {
+		if errToken := resolveToken(); errToken != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errToken.Error()})
+			return
+		}
+		replacement := token
+		if json.Valid([]byte(body.Data)) && strings.ContainsAny(token, "\"\\\r\n\t") {
+			if b, errMarshal := json.Marshal(token); errMarshal == nil && len(b) >= 2 {
+				replacement = string(b[1 : len(b)-1])
+			}
+		}
+		body.Data = strings.ReplaceAll(body.Data, "$TOKEN$", replacement)
+	}
+
+	// When caller indicates CBOR in request headers, convert JSON string payload to CBOR bytes.
+	useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
+
+	var requestBody io.Reader
+	if body.Data != "" {
+		if useCBORPayload {
+			cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
+			if errEncode != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json data for cbor content-type"})
+				return
+			}
+			requestBody = bytes.NewReader(cborPayload)
+		} else {
+			requestBody = strings.NewReader(body.Data)
+		}
+	}
+
+	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+	if errNewRequest != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
+		return
+	}
+
+	for key, value := range reqHeaders {
+		if strings.EqualFold(key, "host") {
+			hostOverride = strings.TrimSpace(value)
+			continue
+		}
+		req.Header.Set(key, value)
+	}
+	if hostOverride != "" {
+		req.Host = hostOverride
+	}
+
+	httpClient := &http.Client{
+		Timeout: defaultAPICallTimeout,
+	}
+	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
+
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
-	if result.auth != nil && result.token != "" && (result.statusCode == http.StatusUnauthorized || result.statusCode == http.StatusForbidden) {
-		if retried, errRetry := doCall(true, result.token); errRetry == nil {
-			result = retried
-		} else {
-			log.WithError(errRetry).Debug("management APICall auth refresh retry failed")
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
 		}
+	}()
+
+	respBody, errReadAll := io.ReadAll(resp.Body)
+	if errReadAll != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
+		return
 	}
 
 	// For CBOR upstream responses, decode into plain text or JSON string before returning.
-	responseBodyText := string(result.body)
-	if headerContainsValue(result.headers, "Accept", "application/cbor") || strings.Contains(strings.ToLower(result.header.Get("Content-Type")), "application/cbor") {
-		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(result.body); errDecode == nil {
+	responseBodyText := string(respBody)
+	if headerContainsValue(reqHeaders, "Accept", "application/cbor") || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/cbor") {
+		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(respBody); errDecode == nil {
 			responseBodyText = decodedBody
 		}
 	}
 
-	auth = result.auth
 	response := apiCallResponse{
-		StatusCode: result.statusCode,
-		Header:     result.header,
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header,
 		Body:       responseBodyText,
 	}
 
 	// If this is a GitHub Copilot token endpoint response, try to enrich with quota information
-	if result.statusCode == http.StatusOK &&
+	if resp.StatusCode == http.StatusOK &&
 		strings.Contains(urlStr, "copilot_internal") &&
 		strings.Contains(urlStr, "/token") {
 		response = h.enrichCopilotTokenResponse(c.Request.Context(), response, auth, urlStr)
@@ -291,23 +316,6 @@ func (h *Handler) APICall(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, response)
 	}
-}
-
-func cloneStringMap(src map[string]string) map[string]string {
-	out := make(map[string]string, len(src))
-	for key, value := range src {
-		out[key] = value
-	}
-	return out
-}
-
-func mapContainsValue(values map[string]string, needle string) bool {
-	for _, value := range values {
-		if strings.Contains(value, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -333,36 +341,502 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
 			return v
 		}
+		if v := strings.TrimSpace(auth.Attributes["session_token"]); v != "" {
+			return v
+		}
 	}
 	return ""
 }
 
-func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, forceRefresh bool, failedAccessToken string) (*coreauth.Auth, string, error) {
+func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if auth == nil {
-		return nil, "", nil
+		return "", nil
 	}
 
-	if h != nil && h.authManager != nil && auth.ID != "" {
-		var updated *coreauth.Auth
-		var errRefresh error
-		if forceRefresh {
-			updated, _, errRefresh = h.authManager.ForceRefresh(ctx, auth.ID, failedAccessToken)
-		} else {
-			updated, _, errRefresh = h.authManager.EnsureFresh(ctx, auth.ID)
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth, requestProxyURL)
+		return token, errToken
+	}
+
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		token, errToken := h.resolveMetaToken(ctx, auth, requestProxyURL)
+		return token, errToken
+	}
+
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		token, errToken := h.resolveXAIToken(ctx, auth, requestProxyURL)
+		return token, errToken
+	}
+
+	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) resolveXAIToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	current := xaiTokenValue(auth)
+	if current != "" && !xaiOAuthTokenNeedsRefresh(auth) {
+		return current, nil
+	}
+
+	refreshToken := xaiRefreshToken(auth)
+	if refreshToken == "" {
+		return current, nil
+	}
+
+	proxyURL := strings.TrimSpace(requestProxyURL)
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
+	}
+	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, proxyURL)
+	tokenEndpoint := xaiTokenEndpoint(auth)
+	td, errRefresh := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
+	if errRefresh != nil {
+		return "", errRefresh
+	}
+	if td == nil || strings.TrimSpace(td.AccessToken) == "" {
+		return "", fmt.Errorf("xai oauth token refresh returned empty access_token")
+	}
+
+	now := time.Now()
+	metadata := make(map[string]any, len(auth.Metadata)+10)
+	if auth.Metadata != nil {
+		for k, v := range auth.Metadata {
+			metadata[k] = v
 		}
-		if errRefresh != nil {
-			currentToken := tokenValueForAuth(auth)
-			if !forceRefresh && currentToken != "" {
-				return auth, currentToken, nil
+	}
+	metadata["type"] = "xai"
+	metadata["auth_kind"] = "oauth"
+	metadata["access_token"] = strings.TrimSpace(td.AccessToken)
+	if strings.TrimSpace(td.RefreshToken) != "" {
+		metadata["refresh_token"] = strings.TrimSpace(td.RefreshToken)
+	}
+	if strings.TrimSpace(td.IDToken) != "" {
+		metadata["id_token"] = strings.TrimSpace(td.IDToken)
+	}
+	if strings.TrimSpace(td.TokenType) != "" {
+		metadata["token_type"] = strings.TrimSpace(td.TokenType)
+	}
+	if td.ExpiresIn > 0 {
+		metadata["expires_in"] = td.ExpiresIn
+	}
+	if strings.TrimSpace(td.Expire) != "" {
+		metadata["expired"] = strings.TrimSpace(td.Expire)
+	}
+	if strings.TrimSpace(td.Email) != "" {
+		metadata["email"] = strings.TrimSpace(td.Email)
+	}
+	if strings.TrimSpace(td.Subject) != "" {
+		metadata["sub"] = strings.TrimSpace(td.Subject)
+	}
+	if tokenEndpoint != "" {
+		metadata["token_endpoint"] = tokenEndpoint
+	}
+	if stringValue(metadata, "base_url") == "" {
+		metadata["base_url"] = xaiauth.DefaultAPIBaseURL
+	}
+	metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+	auth.Metadata = metadata
+
+	attributes := make(map[string]string, len(auth.Attributes)+2)
+	if auth.Attributes != nil {
+		for k, v := range auth.Attributes {
+			attributes[k] = v
+		}
+	}
+	attributes["auth_kind"] = "oauth"
+	if strings.TrimSpace(attributes["base_url"]) == "" {
+		attributes["base_url"] = xaiauth.DefaultAPIBaseURL
+	}
+	auth.Attributes = attributes
+
+	if ts := xaiTokenStorage(auth); ts != nil {
+		copyStorage := *ts
+		copyStorage.AccessToken = strings.TrimSpace(td.AccessToken)
+		if strings.TrimSpace(td.RefreshToken) != "" {
+			copyStorage.RefreshToken = strings.TrimSpace(td.RefreshToken)
+		}
+		if strings.TrimSpace(td.IDToken) != "" {
+			copyStorage.IDToken = strings.TrimSpace(td.IDToken)
+		}
+		if strings.TrimSpace(td.TokenType) != "" {
+			copyStorage.TokenType = strings.TrimSpace(td.TokenType)
+		}
+		if td.ExpiresIn > 0 {
+			copyStorage.ExpiresIn = td.ExpiresIn
+		}
+		if strings.TrimSpace(td.Expire) != "" {
+			copyStorage.Expire = strings.TrimSpace(td.Expire)
+		}
+		if strings.TrimSpace(td.Email) != "" {
+			copyStorage.Email = strings.TrimSpace(td.Email)
+		}
+		if strings.TrimSpace(td.Subject) != "" {
+			copyStorage.Subject = strings.TrimSpace(td.Subject)
+		}
+		copyStorage.LastRefresh = now.UTC().Format(time.RFC3339)
+		auth.Storage = &copyStorage
+	}
+
+	if store := h.tokenStoreWithBaseDir(); store != nil && !coreauth.IsConfigAPIKeyAuth(auth) {
+		if _, errSave := store.Save(ctx, auth); errSave != nil {
+			log.WithError(errSave).Warn("management APICall: failed to persist refreshed xai oauth token")
+		}
+	}
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			log.WithError(errUpdate).Warn("management APICall: failed to update refreshed xai oauth credential in manager")
+		}
+	}
+
+	return strings.TrimSpace(td.AccessToken), nil
+}
+
+func xaiTokenValue(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			return v
+		}
+	}
+	if auth.Metadata != nil {
+		if v := stringValue(auth.Metadata, "api_key"); v != "" {
+			return v
+		}
+		if v := stringValue(auth.Metadata, "access_token"); v != "" {
+			return v
+		}
+		if v := stringValue(auth.Metadata, "accessToken"); v != "" {
+			return v
+		}
+	}
+	if ts := xaiTokenStorage(auth); ts != nil {
+		if v := strings.TrimSpace(ts.AccessToken); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func xaiRefreshToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if v := stringValue(auth.Metadata, "refresh_token"); v != "" {
+		return v
+	}
+	if ts := xaiTokenStorage(auth); ts != nil {
+		return strings.TrimSpace(ts.RefreshToken)
+	}
+	return ""
+}
+
+func xaiTokenEndpoint(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if v := stringValue(auth.Metadata, "token_endpoint"); v != "" {
+		return v
+	}
+	if ts := xaiTokenStorage(auth); ts != nil {
+		return strings.TrimSpace(ts.TokenEndpoint)
+	}
+	return ""
+}
+
+func xaiTokenStorage(auth *coreauth.Auth) *xaiauth.TokenStorage {
+	if auth == nil {
+		return nil
+	}
+	ts, ok := auth.Storage.(*xaiauth.TokenStorage)
+	if !ok {
+		return nil
+	}
+	return ts
+}
+
+func xaiOAuthTokenNeedsRefresh(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return true
+	}
+	tokenStr := xaiTokenValue(auth)
+	if tokenStr == "" {
+		return true
+	}
+
+	lead := xaiauth.RefreshLead()
+	now := time.Now()
+	if lead > 0 {
+		now = now.Add(lead)
+	}
+
+	temp := auth.Clone()
+	if temp.Metadata == nil {
+		temp.Metadata = make(map[string]any)
+	}
+	if stringValue(temp.Metadata, "access_token") == "" {
+		temp.Metadata["access_token"] = tokenStr
+	}
+	if ts := xaiTokenStorage(auth); ts != nil {
+		if stringValue(temp.Metadata, "expired") == "" && strings.TrimSpace(ts.Expire) != "" {
+			temp.Metadata["expired"] = strings.TrimSpace(ts.Expire)
+		}
+		if _, ok := temp.Metadata["expires_in"]; !ok && ts.ExpiresIn > 0 {
+			temp.Metadata["expires_in"] = ts.ExpiresIn
+		}
+		if stringValue(temp.Metadata, "last_refresh") == "" && strings.TrimSpace(ts.LastRefresh) != "" {
+			temp.Metadata["last_refresh"] = strings.TrimSpace(ts.LastRefresh)
+		}
+	}
+
+	return !temp.HasValidAccessToken(now)
+}
+
+func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	metadata := auth.Metadata
+	if len(metadata) == 0 {
+		return "", fmt.Errorf("antigravity oauth metadata missing")
+	}
+
+	current := strings.TrimSpace(tokenValueFromMetadata(metadata))
+	if current != "" && !antigravityTokenNeedsRefresh(metadata) {
+		return current, nil
+	}
+
+	refreshToken := stringValue(metadata, "refresh_token")
+	if refreshToken == "" {
+		return "", fmt.Errorf("antigravity refresh token missing")
+	}
+
+	tokenURL := strings.TrimSpace(antigravityOAuthTokenURL)
+	if tokenURL == "" {
+		tokenURL = "https://oauth2.googleapis.com/token"
+	}
+	form := url.Values{}
+	clientID := antigravityOAuthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
+	clientSecret := antigravityOAuthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
+	if clientID == "" || clientSecret == "" {
+		return "", fmt.Errorf("antigravity oauth client credentials missing")
+	}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if errReq != nil {
+		return "", errReq
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	httpClient := &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth, requestProxyURL),
+	}
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		return "", errDo
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return "", errRead
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("antigravity oauth token refresh failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		TokenType    string `json:"token_type"`
+	}
+	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return "", fmt.Errorf("antigravity oauth token refresh returned empty access_token")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["access_token"] = strings.TrimSpace(tokenResp.AccessToken)
+	if strings.TrimSpace(tokenResp.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(tokenResp.RefreshToken)
+	}
+	if tokenResp.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = tokenResp.ExpiresIn
+		auth.Metadata["timestamp"] = now.UnixMilli()
+		auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
+	}
+	auth.Metadata["type"] = "antigravity"
+
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+
+	return strings.TrimSpace(tokenResp.AccessToken), nil
+}
+
+func metaTokenFromAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if k, ok := auth.Metadata["api_key"].(string); ok && strings.TrimSpace(k) != "" && !strings.HasPrefix(strings.TrimSpace(k), "dca:") {
+			return strings.TrimSpace(k)
+		}
+		if t, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(t) != "" && !strings.HasPrefix(strings.TrimSpace(t), "dca:") {
+			return strings.TrimSpace(t)
+		}
+	}
+	if auth.Attributes != nil {
+		if k := strings.TrimSpace(auth.Attributes["api_key"]); k != "" && !strings.HasPrefix(k, "dca:") {
+			return k
+		}
+		if t := strings.TrimSpace(auth.Attributes["access_token"]); t != "" && !strings.HasPrefix(t, "dca:") {
+			return t
+		}
+	}
+	return ""
+}
+
+// metaManagementPreparer applies the tool's proxy override only to acquisition.
+// The saved credential retains its configured proxy.
+type metaManagementPreparer struct {
+	executor *executor.MetaExecutor
+	proxyURL string
+}
+
+func (p metaManagementPreparer) ShouldPrepareRequestAuth(auth *coreauth.Auth) bool {
+	return p.executor.ShouldPrepareRequestAuth(auth)
+}
+
+func (p metaManagementPreparer) PrepareRequestAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	proxyURL := auth.ProxyURL
+	if strings.TrimSpace(p.proxyURL) != "" {
+		auth.ProxyURL = p.proxyURL
+	}
+	updated, err := p.executor.PrepareRequestAuth(ctx, auth)
+	if updated != nil {
+		updated.ProxyURL = proxyURL
+	}
+	return updated, err
+}
+
+func (h *Handler) resolveMetaToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	if token := metaTokenFromAuth(auth); token != "" {
+		return token, nil
+	}
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
+	}
+	preparer := metaManagementPreparer{executor: executor.NewMetaExecutor(cfg), proxyURL: requestProxyURL}
+	if !preparer.ShouldPrepareRequestAuth(auth) {
+		return "", nil
+	}
+	if h == nil || h.authManager == nil || auth.ID == "" {
+		return "", fmt.Errorf("meta token mint requires a registered credential")
+	}
+	updated, err := h.authManager.PrepareRequestAuth(ctx, preparer, auth)
+	if err != nil {
+		return "", err
+	}
+	return metaTokenFromAuth(updated), nil
+}
+
+func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
+	// Refresh a bit early to avoid requests racing token expiry.
+	const skew = 30 * time.Second
+
+	if metadata == nil {
+		return true
+	}
+	if expStr, ok := metadata["expired"].(string); ok {
+		if ts, errParse := time.Parse(time.RFC3339, strings.TrimSpace(expStr)); errParse == nil {
+			return !ts.After(time.Now().Add(skew))
+		}
+	}
+	expiresIn := int64Value(metadata["expires_in"])
+	timestampMs := int64Value(metadata["timestamp"])
+	if expiresIn > 0 && timestampMs > 0 {
+		exp := time.UnixMilli(timestampMs).Add(time.Duration(expiresIn) * time.Second)
+		return !exp.After(time.Now().Add(skew))
+	}
+	return true
+}
+
+func int64Value(raw any) int64 {
+	switch typed := raw.(type) {
+	case int:
+		return int64(typed)
+	case int32:
+		return int64(typed)
+	case int64:
+		return typed
+	case uint:
+		return int64(typed)
+	case uint32:
+		return int64(typed)
+	case uint64:
+		if typed > uint64(^uint64(0)>>1) {
+			return 0
+		}
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if i, errParse := typed.Int64(); errParse == nil {
+			return i
+		}
+	case string:
+		if s := strings.TrimSpace(typed); s != "" {
+			if i, errParse := json.Number(s).Int64(); errParse == nil {
+				return i
 			}
-			return auth, "", errRefresh
-		}
-		if updated != nil {
-			auth = updated
 		}
 	}
-
-	return auth, tokenValueForAuth(auth), nil
+	return 0
 }
 
 func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]any)) {
@@ -380,6 +854,37 @@ func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]a
 		for key, value := range fields {
 			auth.Metadata[key] = value
 		}
+	}
+}
+
+func stringValue(metadata map[string]any, key string) string {
+	if len(metadata) == 0 || key == "" {
+		return ""
+	}
+	if v, ok := metadata[key].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func oauthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := stringValue(metadata, key); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(envName))
+}
+
+func antigravityOAuthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := oauthClientValue(metadata, key, envName); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityOAuthClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityOAuthClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
 	}
 }
 
@@ -469,6 +974,12 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 		return strings.TrimSpace(v)
 	}
 	if v, ok := metadata["id_token"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := metadata["api_key"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := metadata["session_token"].(string); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
 	if v, ok := metadata["cookie"].(string); ok && strings.TrimSpace(v) != "" {
@@ -622,6 +1133,10 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		}
 	case "xai":
 		if entry := resolveAPIKeyConfig(cfg.XAIKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "meta":
+		if entry := resolveAPIKeyConfig(cfg.MetaKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
 	}
@@ -826,7 +1341,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	updatedAuth, token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, false, "")
+	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, "")
 	if tokenErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to refresh copilot token"})
 		return
@@ -834,9 +1349,6 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	if token == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "copilot token not found"})
 		return
-	}
-	if updatedAuth != nil {
-		auth = updatedAuth
 	}
 
 	apiURL := "https://api.github.com/copilot_internal/user"
@@ -939,7 +1451,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	// Get the GitHub token to call the copilot_internal/user endpoint
-	_, token, tokenErr := h.resolveTokenForAuth(ctx, auth, false, "")
+	token, tokenErr := h.resolveTokenForAuth(ctx, auth, "")
 	if tokenErr != nil {
 		log.WithError(tokenErr).Debug("enrichCopilotTokenResponse: failed to resolve token")
 		return response

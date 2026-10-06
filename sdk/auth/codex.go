@@ -32,7 +32,7 @@ func (a *CodexAuthenticator) Provider() string {
 }
 
 func (a *CodexAuthenticator) RefreshLead() *time.Duration {
-	return new(5 * 24 * time.Hour)
+	return new(24 * time.Hour)
 }
 
 func (a *CodexAuthenticator) RefreshMaxAge() *time.Duration {

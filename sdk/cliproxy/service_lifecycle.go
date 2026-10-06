@@ -88,6 +88,13 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
+			includeBaseline: true,
+			auths:           s.coreManager.List(),
+		})
+		interval := 15 * time.Minute
+		s.coreManager.StartAutoRefresh(ctx, interval)
+		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
 	// Register post-fetch hook for OpenCode models: after async fetch completes,
@@ -216,6 +223,7 @@ func (s *Service) Run(ctx context.Context) error {
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
 	s.applyPprofConfig(s.cfg)
+	s.applyDiscoveryConfig(s.cfg)
 
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
@@ -247,13 +255,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
-
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil && !homeEnabled {
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(context.Background(), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
 
 	select {
 	case <-ctx.Done():
@@ -377,6 +378,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
 			if shutdownErr == nil {
 				shutdownErr = errShutdownPprof
+			}
+		}
+
+		if errShutdownDiscovery := s.shutdownDiscovery(); errShutdownDiscovery != nil {
+			log.Errorf("failed to stop discovery advertiser: %v", errShutdownDiscovery)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownDiscovery
 			}
 		}
 
