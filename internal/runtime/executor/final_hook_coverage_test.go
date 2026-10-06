@@ -35,7 +35,7 @@ func TestActiveChatExecutorsDoNotSilentlyBypassFinalHook(t *testing.T) {
 		"gitlab_executor.go":              {"finalProviderHookUnsupported", 2},
 		"codebuddy_executor.go":           {"applyFinalHookBody", 2},
 		"qoder_executor.go":               {"finalProviderHookUnsupported", 2},
-		"cursor_executor.go":              {"finalProviderHookUnsupported", 2},
+		"cursor_executor.go":              {"applyFinalHookBytes", 3},
 		"codex_websockets_execute.go":     {"FinalProviderRequestHook", 1},
 		"codex_websockets_stream.go":      {"FinalProviderRequestHook", 1},
 	}
@@ -53,7 +53,7 @@ func TestActiveChatExecutorsDoNotSilentlyBypassFinalHook(t *testing.T) {
 func TestUnsupportedFinalHookErrorIsRequestScoped(t *testing.T) {
 	err := finalProviderHookUnsupported(cliproxyexecutor.Options{FinalProviderRequestHook: func(context.Context, cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
 		return cliproxyexecutor.FinalProviderRequestResult{}, nil
-	}}, "cursor")
+	}}, "qoder")
 	var scoped cliproxyexecutor.RequestScopedError
 	if !errors.As(err, &scoped) || !scoped.IsRequestScoped() {
 		t.Fatalf("error is not request scoped: %T %v", err, err)
@@ -76,7 +76,7 @@ func TestCountTokenImplementationsDoNotSilentlyBypassFinalHook(t *testing.T) {
 		"kilo_executor.go":               "count tokens not supported",
 		"iflow_executor.go":              "applyFinalHookBytes",
 		"codebuddy_executor.go":          "count tokens not supported",
-		"cursor_executor.go":             "finalProviderHookUnsupported",
+		"cursor_executor.go":             "applyFinalHookBytes",
 		"gitlab_executor.go":             "finalProviderHookUnsupported",
 		"qoder_executor.go":              "finalProviderHookUnsupported",
 	}

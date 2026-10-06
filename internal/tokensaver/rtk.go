@@ -5,6 +5,11 @@ func applyRTK(root any) int {
 	if !ok {
 		return 0
 	}
+	// Kiro bodies carry tool results under conversationState (9router
+	// compressKiroFormat); they never carry a top-level messages array.
+	if state, ok := m["conversationState"].(map[string]any); ok {
+		return compressKiroRTK(state)
+	}
 	hits := 0
 	if messages, _, ok := firstArray(m, "messages", "input"); ok {
 		for _, item := range messages {
@@ -13,6 +18,64 @@ func applyRTK(root any) int {
 				continue
 			}
 			hits += compressMessageToolContent(msg)
+		}
+	}
+	return hits
+}
+
+// compressKiroRTK walks
+// conversationState.{history[],currentMessage}.userInputMessage.
+// userInputMessageContext.toolResults[].content[].text and compresses each
+// text blob, skipping error tool results.
+func compressKiroRTK(state map[string]any) int {
+	var items []any
+	if history, ok := state["history"].([]any); ok {
+		items = append(items, history...)
+	}
+	if current, ok := state["currentMessage"]; ok && current != nil {
+		items = append(items, current)
+	}
+	hits := 0
+	for _, item := range items {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		um, ok := msg["userInputMessage"].(map[string]any)
+		if !ok {
+			continue
+		}
+		ctx, ok := um["userInputMessageContext"].(map[string]any)
+		if !ok {
+			continue
+		}
+		toolResults, ok := ctx["toolResults"].([]any)
+		if !ok {
+			continue
+		}
+		for _, trItem := range toolResults {
+			tr, ok := trItem.(map[string]any)
+			if !ok || tr["status"] == "error" {
+				continue
+			}
+			parts, ok := tr["content"].([]any)
+			if !ok {
+				continue
+			}
+			for _, partItem := range parts {
+				part, ok := partItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				text, ok := part["text"].(string)
+				if !ok {
+					continue
+				}
+				if out, changed := compressToolText(text); changed {
+					part["text"] = out
+					hits++
+				}
+			}
 		}
 	}
 	return hits
@@ -78,15 +141,36 @@ func compressContentValue(m map[string]any, key string) int {
 	return hits
 }
 
+// rtkMinCompressSize is CLIProxy's per-blob gate. 9router uses 500 bytes, but
+// CLIProxy historically compresses from 40; the shrink-or-reject safety check
+// below keeps small blobs from ever growing.
+const rtkMinCompressSize = 40
+
+// compressToolText runs the autodetect filter suite over one tool_result
+// blob. Port of 9router index.js compressText: size gates, filter selection,
+// panic-safe apply, and a never-grow safety net.
 func compressToolText(text string) (string, bool) {
-	if len(text) < 40 {
+	if len(text) < rtkMinCompressSize || len(text) > rtkRawCap {
 		return text, false
 	}
-	for _, filter := range []func(string) (string, bool){compactGrepOutput, compactLongLineOutput} {
-		out, ok := filter(text)
-		if ok && out != "" && len(out) < len(text) {
-			return out, true
-		}
+	filter := autoDetectFilter(text)
+	if filter == nil {
+		return text, false
 	}
-	return text, false
+	out := safeApplyRTK(filter, text)
+	if out == "" || len(out) >= len(text) {
+		return text, false
+	}
+	return out, true
+}
+
+// safeApplyRTK mirrors 9router safeApply: a panicking filter passes the raw
+// input through instead of failing the request.
+func safeApplyRTK(filter rtkFilterFunc, text string) (out string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			out = text
+		}
+	}()
+	return filter(text)
 }

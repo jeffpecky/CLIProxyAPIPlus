@@ -351,7 +351,7 @@ func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 // CountTokens estimates token count locally using tiktoken.
-func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+func (e *CursorExecutor) CountTokens(ctx context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	defer func() {
 		if err != nil {
 			log.Warnf("cursor CountTokens error: %v", err)
@@ -359,10 +359,13 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 			log.Debugf("cursor CountTokens: model=%s result=%s", req.Model, string(resp.Payload))
 		}
 	}()
-	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
-		return resp, err
+	// Savers transform the body before send; count the same transformed source
+	// body so estimates match what Execute will actually submit.
+	payload, errHook := applyFinalHookBytes(ctx, req.Payload, req.Model, opts.SourceFormat, req, opts)
+	if errHook != nil {
+		return resp, errHook
 	}
-	model := gjson.GetBytes(req.Payload, "model").String()
+	model := gjson.GetBytes(payload, "model").String()
 	if model == "" {
 		model = req.Model
 	}
@@ -375,10 +378,10 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 
 	// Detect format: Claude (/v1/messages) vs OpenAI (/v1/chat/completions)
 	var count int64
-	if gjson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
-		count, _ = countClaudeChatTokens(enc, req.Payload)
+	if gjson.GetBytes(payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
+		count, _ = countClaudeChatTokens(enc, payload)
 	} else {
-		count, _ = countOpenAIChatTokens(enc, req.Payload)
+		count, _ = countOpenAIChatTokens(enc, payload)
 	}
 
 	return cliproxyexecutor.Response{Payload: buildOpenAIUsageJSON(count)}, nil
@@ -418,8 +421,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}()
 
-	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
-		return resp, err
+	// Cursor's proprietary wire format cannot be rewritten after translation,
+	// so the token saver runs on the source body before translation: the
+	// translator rewrites tool results into user text, and savers must see the
+	// original shapes (9router pre-translates RTK for cursor the same way).
+	sourcePayload, errHook := applyFinalHookBytes(ctx, req.Payload, req.Model, opts.SourceFormat, req, opts)
+	if errHook != nil {
+		return resp, errHook
 	}
 
 	accessToken := cursorAccessToken(auth)
@@ -429,7 +437,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	payload := req.Payload
+	payload := sourcePayload
 	if from.String() != "" && from.String() != "openai" {
 		payload = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
 	}
@@ -439,7 +447,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	defer usageReporter.TrackFailure(ctx, &err)
 
 	parsed := parseOpenAIRequest(payload)
-	sessionID := extractClaudeCodeSessionId(req.Payload)
+	sessionID := extractClaudeCodeSessionId(sourcePayload)
 	conversationID := deriveConversationId(apiKeyFromContext(ctx), sessionID, parsed.SystemPrompt)
 	openAICompatible := isOpenAICompatibleSourceFormat(from)
 	if openAICompatible && len(parsed.ToolResults) > 0 {
@@ -575,8 +583,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			log.Warnf("cursor ExecuteStream error: %v", err)
 		}
 	}()
-	if err = finalProviderHookUnsupported(opts, "cursor"); err != nil {
-		return nil, err
+	// Apply the token saver to the source body before translation (see Execute).
+	sourcePayload, errHook := applyFinalHookBytes(ctx, req.Payload, req.Model, opts.SourceFormat, req, opts)
+	if errHook != nil {
+		return nil, errHook
 	}
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
@@ -584,7 +594,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Extract session_id before translation, which strips metadata.
-	sessionID := extractClaudeCodeSessionId(req.Payload)
+	sessionID := extractClaudeCodeSessionId(sourcePayload)
 	if sessionID == "" && len(opts.OriginalRequest) > 0 {
 		sessionID = extractClaudeCodeSessionId(opts.OriginalRequest)
 	}
@@ -592,7 +602,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Translate input to OpenAI format if needed
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	payload := req.Payload
+	payload := sourcePayload
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)

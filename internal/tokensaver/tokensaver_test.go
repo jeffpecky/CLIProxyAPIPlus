@@ -3,6 +3,7 @@ package tokensaver
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +73,39 @@ func TestCavemanInjectsOpenAISystem(t *testing.T) {
 	}
 }
 
+func TestCavemanUnknownLevelFallsBackToFull(t *testing.T) {
+	for _, level := range []string{"terse", "standard", ""} {
+		body := []byte(`{"model":"m","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+		out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: level}}})
+		if !stats.Caveman || !bytes.Contains(out, []byte("Respond like terse caveman")) {
+			t.Fatalf("level %q did not fall back to full prompt: stats=%+v body=%s", level, stats, out)
+		}
+	}
+}
+
+func TestCavemanWenyanLevelsInject(t *testing.T) {
+	tests := []struct{ level, want string }{
+		{"wenyan-lite", "Respond semi-classical"},
+		{"wenyan", "文言文"},
+		{"wenyan-ultra", "文言文 ultra"},
+	}
+	for _, test := range tests {
+		body := []byte(`{"model":"m","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+		out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Caveman: config.TokenSaverPromptConfig{Enabled: true, Level: test.level}}})
+		if !stats.Caveman || !bytes.Contains(out, []byte(test.want)) {
+			t.Fatalf("wenyan level %q not injected (want %q): stats=%+v body=%s", test.level, test.want, stats, out)
+		}
+	}
+}
+
+func TestPonytailUnknownLevelFallsBackToFull(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Ponytail: config.TokenSaverPromptConfig{Enabled: true, Level: "standard"}}})
+	if !stats.Ponytail || !bytes.Contains(out, []byte("lazy senior developer")) {
+		t.Fatalf("ponytail did not fall back to full prompt: stats=%+v body=%s", stats, out)
+	}
+}
+
 func TestOpenAISystemArrayUsesProtocolContentType(t *testing.T) {
 	tests := []struct{ name, format, body, want string }{
 		{"chat system", "openai", `{"messages":[{"role":"system","content":[{"type":"text","text":"base"}]}]}`, "text"},
@@ -123,8 +157,16 @@ func TestCavemanInjectsGeminiSystemInstruction(t *testing.T) {
 	}
 }
 
+func rtkGrepFixture() string {
+	var b strings.Builder
+	for i := 10; i < 25; i++ {
+		fmt.Fprintf(&b, "internal/config/token_saver.go:%d: unexpected token standard in caveman level, valid levels are lite and full\\n", i)
+	}
+	return b.String()
+}
+
 func TestRTKCompressesOpenAIToolGrep(t *testing.T) {
-	body := []byte(`{"model":"m","messages":[{"role":"tool","content":"src/a.go:10: alpha\nsrc/a.go:11: beta\nsrc/b.go:2: gamma\nsrc/b.go:3: delta\n"}]}`)
+	body := []byte(`{"model":"m","messages":[{"role":"tool","content":"` + rtkGrepFixture() + `"}]}`)
 	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, RTK: true}})
 	if stats.RTKHits == 0 {
 		t.Fatalf("no rtk hit: body=%s", out)
@@ -132,13 +174,27 @@ func TestRTKCompressesOpenAIToolGrep(t *testing.T) {
 	if len(out) >= len(body) {
 		t.Fatalf("output did not shrink: before=%d after=%d body=%s", len(body), len(out), out)
 	}
+	if !bytes.Contains(out, []byte("15 matches in 1F:")) {
+		t.Fatalf("grep suite output missing: %s", out)
+	}
 }
 
 func TestRTKCompressesOpenAIResponsesOutput(t *testing.T) {
-	body := []byte(`{"model":"m","input":[{"type":"function_call_output","output":"src/a.go:10: alpha\nsrc/a.go:11: beta\nsrc/b.go:2: gamma\nsrc/b.go:3: delta\n"}]}`)
+	body := []byte(`{"model":"m","input":[{"type":"function_call_output","output":"` + rtkGrepFixture() + `"}]}`)
 	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, RTK: true}})
 	if stats.RTKHits == 0 || len(out) >= len(body) {
 		t.Fatalf("responses output not compressed: stats=%+v body=%s", stats, out)
+	}
+}
+
+func TestRTKCompressesKiroToolResult(t *testing.T) {
+	body := []byte(`{"model":"m","conversationState":{"currentMessage":{"userInputMessage":{"content":"q","userInputMessageContext":{"toolResults":[{"toolUseId":"call-1","content":[{"text":"` + rtkGrepFixture() + `"}]}]}}}}}`)
+	out, stats := Apply(Options{Body: body, Format: "kiro", Config: config.TokenSaverConfig{Enabled: true, RTK: true}})
+	if stats.RTKHits == 0 || len(out) >= len(body) {
+		t.Fatalf("kiro tool result not compressed: stats=%+v body=%s", stats, out)
+	}
+	if !bytes.Contains(out, []byte("15 matches in 1F:")) {
+		t.Fatalf("kiro rtk output missing: %s", out)
 	}
 }
 
@@ -334,5 +390,45 @@ func TestHeadroomRejectsOversizedResponse(t *testing.T) {
 	out, stats := Apply(Options{Body: body, Format: "openai", Config: config.TokenSaverConfig{Enabled: true, Headroom: config.TokenSaverHeadroomConfig{Enabled: true, URL: server.URL, TimeoutMS: 1000}}})
 	if !bytes.Equal(out, body) || stats.Headroom || !strings.Contains(stats.HeadroomSkip, "large") {
 		t.Fatalf("oversized Headroom response not rejected: stats=%+v body=%s", stats, out)
+	}
+}
+
+// TestApplyClaudeCacheMarkersSurviveSavers locks the invariant that makes a
+// 9router-style post-saver anchorClaudeCache pass unnecessary: every saver
+// preserves cache_control markers (caveman and ponytail insert before the last
+// marker, RTK rewrites text in place, headroom is structure-locked), so the
+// markers anchored by the executor's pre-hook cache suite stay valid and last.
+func TestApplyClaudeCacheMarkersSurviveSavers(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":100,"system":[{"type":"text","text":"sys base"},{"type":"text","text":"sys cached","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":"ok"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"` + rtkGrepFixture() + `"},{"type":"text","text":"question","cache_control":{"type":"ephemeral"}}]}]}`)
+	cfg := config.TokenSaverConfig{
+		Enabled:  true,
+		RTK:      true,
+		Caveman:  config.TokenSaverPromptConfig{Enabled: true, Level: "full"},
+		Ponytail: config.TokenSaverPromptConfig{Enabled: true, Level: "full"},
+	}
+	out, stats := Apply(Options{Body: body, Format: "claude", Config: cfg})
+	if !stats.Applied || stats.RTKHits == 0 || !stats.Caveman || !stats.Ponytail {
+		t.Fatalf("expected all savers applied: stats=%+v", stats)
+	}
+	if !bytes.Contains(out, []byte("15 matches in 1F:")) {
+		t.Fatalf("rtk did not compress tool result: %s", out)
+	}
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 4 {
+		t.Fatalf("system blocks = %d, want 4 (base + caveman + ponytail + marker): %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "system.3.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control marker not last: type=%q body=%s", got, out)
+	}
+	if !bytes.Contains([]byte(gjson.GetBytes(out, "system.1.text").String()), []byte("Respond like terse caveman")) {
+		t.Fatalf("caveman block missing before system marker: %s", out)
+	}
+	if !bytes.Contains([]byte(gjson.GetBytes(out, "system.2.text").String()), []byte("lazy senior developer")) {
+		t.Fatalf("ponytail block missing before system marker: %s", out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.#").Int(); got != 2 {
+		t.Fatalf("message content blocks = %d, want 2: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("message cache_control marker moved or lost: type=%q body=%s", got, out)
 	}
 }

@@ -196,6 +196,10 @@ type Options struct {
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// FinalProviderRequestHook runs after provider translation and before wire send.
+	// Cursor applies it to the source body before translation instead: its
+	// translator rewrites tool results into user text, so savers must see the
+	// original tool_result shapes, and the proprietary wire format cannot be
+	// rewritten afterwards.
 	FinalProviderRequestHook FinalProviderRequestHook
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle

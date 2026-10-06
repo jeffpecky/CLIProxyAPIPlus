@@ -989,3 +989,79 @@ func TestCursorExecuteNonStreamFlattensConversationTurns(t *testing.T) {
 		t.Fatalf("wire matches the unflattened turns encoding; flatten fix not applied")
 	}
 }
+
+// TestCursorExecuteAppliesFinalHookToSourceBody proves the token saver runs on
+// the source body before translation: Cursor's translator rewrites tool results
+// into user text, so savers must see the original shapes (9router pre-translates
+// RTK for cursor the same way), and the transformed body must reach the wire.
+func TestCursorExecuteAppliesFinalHookToSourceBody(t *testing.T) {
+	var written []byte
+	hookCalls := 0
+	var hookFormat string
+	e := NewCursorExecutor(nil)
+	e.openStream = func(string) (cursorStream, error) {
+		return &recordingCursorStream{inner: newFakeCursorStream(), capture: &written}, nil
+	}
+	e.processFrames = func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		onText("answer", false)
+		return nil
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			hookCalls++
+			hookFormat = in.Format.String()
+			mutated := bytes.Replace(in.Body, []byte(`"content":"hi"`), []byte(`"content":"hi HOOKED_MARKER"`), 1)
+			return cliproxyexecutor.FinalProviderRequestResult{Body: mutated}, nil
+		},
+	}
+	req := cliproxyexecutor.Request{Model: "cursor-test-model", Payload: []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hi"}]}`)}
+	if _, err := e.Execute(context.Background(), cursorTestAuth(), req, opts); err != nil {
+		t.Fatalf("Execute() with final hook error = %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook calls = %d, want 1", hookCalls)
+	}
+	if hookFormat != sdktranslator.FormatOpenAI.String() {
+		t.Fatalf("hook format = %q, want %q", hookFormat, sdktranslator.FormatOpenAI.String())
+	}
+	_, wire, _, ok := cursorproto.ParseConnectFrame(written)
+	if !ok || len(wire) == 0 {
+		t.Fatalf("no connect frame captured (written=%d bytes)", len(written))
+	}
+	if !strings.Contains(string(wire), "HOOKED_MARKER") {
+		t.Fatalf("wire request does not carry the hook-transformed body")
+	}
+}
+
+// TestCursorCountTokensAppliesFinalHookToSourceBody guards that token counting
+// runs the same source-body transformation as Execute instead of rejecting the
+// hook outright.
+func TestCursorCountTokensAppliesFinalHookToSourceBody(t *testing.T) {
+	hookCalls := 0
+	var hookFormat string
+	var hookBody []byte
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		FinalProviderRequestHook: func(_ context.Context, in cliproxyexecutor.FinalProviderRequest) (cliproxyexecutor.FinalProviderRequestResult, error) {
+			hookCalls++
+			hookFormat = in.Format.String()
+			hookBody = append([]byte(nil), in.Body...)
+			return cliproxyexecutor.FinalProviderRequestResult{Body: in.Body}, nil
+		},
+	}
+	req := cliproxyexecutor.Request{Model: "cursor-test-model", Payload: []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello"}]}`)}
+	e := NewCursorExecutor(nil)
+	if _, err := e.CountTokens(context.Background(), nil, req, opts); err != nil {
+		t.Fatalf("CountTokens() with final hook error = %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook calls = %d, want 1", hookCalls)
+	}
+	if hookFormat != sdktranslator.FormatOpenAI.String() {
+		t.Fatalf("hook format = %q, want %q", hookFormat, sdktranslator.FormatOpenAI.String())
+	}
+	if string(hookBody) != string(req.Payload) {
+		t.Fatalf("hook body = %q, want source payload %q", hookBody, req.Payload)
+	}
+}

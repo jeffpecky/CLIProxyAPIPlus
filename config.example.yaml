@@ -51,10 +51,12 @@ debug: false
 #   rtk: true
 #   caveman:
 #     enabled: false
-#     level: terse
+#     # lite | full | ultra | wenyan-lite | wenyan | wenyan-ultra
+#     level: full
 #   ponytail:
 #     enabled: false
-#     level: standard
+#     # lite | full | ultra
+#     level: full
 #   headroom:
 #     enabled: false
 #     url: "http://127.0.0.1:20129"
