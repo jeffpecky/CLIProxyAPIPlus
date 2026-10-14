@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -752,5 +754,52 @@ func TestKiroContextUsageFallbackAppliesWhenPreciseTokenUsageMissing(t *testing.
 	}
 	if detail.TotalTokens != 100003 {
 		t.Fatalf("TotalTokens = %d, want 100003", detail.TotalTokens)
+	}
+}
+
+func TestKiroPooledHTTPClientKeyedByRelay(t *testing.T) {
+	plain := getKiroPooledHTTPClient("")
+	relayed := getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev")
+	if plain == relayed {
+		t.Fatal("relay and non-relay checkouts share a pooled client")
+	}
+	if proxyutil.IsRelayRoundTripper(plain.Transport) {
+		t.Fatal("zero-relay pooled client is relay-wrapped")
+	}
+	if !proxyutil.IsRelayRoundTripper(relayed.Transport) {
+		t.Fatalf("relay pooled client transport %T is not relay-wrapped", relayed.Transport)
+	}
+
+	// Same-key identity: repeat checkouts must return the same client pointer.
+	if again := getKiroPooledHTTPClient(""); again != plain {
+		t.Fatal("same relay key (\"\") did not return the pooled client")
+	}
+	if again := getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev"); again != relayed {
+		t.Fatal("same relay key did not return the pooled client")
+	}
+
+	// Concurrent-checkout smoke: interleaved checkouts under both keys must not
+	// panic and must only ever surface the two expected clients. (-race is
+	// unavailable on this box, so this is a structural smoke, not a proof.)
+	const goroutines = 32
+	seen := make(chan *http.Client, goroutines*2)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			seen <- getKiroPooledHTTPClient("")
+		}()
+		go func() {
+			defer wg.Done()
+			seen <- getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev")
+		}()
+	}
+	wg.Wait()
+	close(seen)
+	for client := range seen {
+		if client != plain && client != relayed {
+			t.Fatalf("concurrent checkout returned unexpected client %p", client)
+		}
 	}
 }

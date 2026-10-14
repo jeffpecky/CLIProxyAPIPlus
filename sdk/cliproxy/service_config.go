@@ -231,7 +231,30 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
+	s.syncRoundTripperProvider(commit.cfg)
 	return true
+}
+
+// syncRoundTripperProvider re-attaches the per-auth RoundTripper provider when
+// the configured relay-url changes, so flows that consume the ctx-injected
+// "cliproxy.roundtripper" (token refresh, credits, conductor, plugin bridges)
+// follow hot config reloads instead of silently routing via the relay snapshot
+// taken at Build time. A relay change swaps in a fresh provider instance,
+// dropping transports cached for the old relay; an unchanged relay keeps the
+// existing provider and its transport cache (the common case: config reloads
+// rarely touch relay-url, and the per-proxy transports are cheap but not free
+// to rebuild mid-flight).
+func (s *Service) syncRoundTripperProvider(cfg *config.Config) {
+	if s == nil || s.coreManager == nil || cfg == nil {
+		return
+	}
+	relayURL := strings.TrimSpace(cfg.RelayURL)
+	if s.roundTripperProvider != nil && s.roundTripperProvider.relayURL == relayURL {
+		return
+	}
+	provider := newDefaultRoundTripperProvider(relayURL)
+	s.roundTripperProvider = provider
+	s.coreManager.SetRoundTripperProvider(provider)
 }
 
 func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Config) bool {

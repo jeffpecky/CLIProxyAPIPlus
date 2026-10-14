@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -268,9 +269,10 @@ func (b *Builder) Build() (*Service, error) {
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	providerRelayURL := ""
 	if b.cfg != nil {
-		providerRelayURL = b.cfg.RelayURL
+		providerRelayURL = strings.TrimSpace(b.cfg.RelayURL)
 	}
-	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider(providerRelayURL))
+	roundTripperProvider := newDefaultRoundTripperProvider(providerRelayURL)
+	coreManager.SetRoundTripperProvider(roundTripperProvider)
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if pluginHost != nil {
@@ -281,20 +283,21 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg,
-		configPath:          b.configPath,
-		tokenProvider:       tokenProvider,
-		apiKeyProvider:      apiKeyProvider,
-		watcherFactory:      watcherFactory,
-		hooks:               b.hooks,
-		authManager:         authManager,
-		accessManager:       accessManager,
-		coreManager:         coreManager,
-		cooldownStateStore:  cooldownStateStore,
-		pluginHost:          pluginHost,
-		discoveryManager:    newDiscoveryAdvertiserManager(),
-		appliedRoutingState: appliedRoutingState,
-		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:                  b.cfg,
+		configPath:           b.configPath,
+		tokenProvider:        tokenProvider,
+		apiKeyProvider:       apiKeyProvider,
+		watcherFactory:       watcherFactory,
+		hooks:                b.hooks,
+		authManager:          authManager,
+		accessManager:        accessManager,
+		coreManager:          coreManager,
+		roundTripperProvider: roundTripperProvider,
+		cooldownStateStore:   cooldownStateStore,
+		pluginHost:           pluginHost,
+		discoveryManager:     newDiscoveryAdvertiserManager(),
+		appliedRoutingState:  appliedRoutingState,
+		serverOptions:        append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))

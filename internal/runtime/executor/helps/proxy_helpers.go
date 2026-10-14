@@ -27,7 +27,7 @@ var (
 // 3. Use cfg.ProxyURL if auth proxy is not configured
 // 4. Use RoundTripper from context if none are configured
 //
-// This function caches HTTP clients by proxy URL to enable TCP/TLS connection reuse.
+// This function caches HTTP clients by proxy URL + relay URL to enable TCP/TLS connection reuse.
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -73,7 +73,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
-			relayWrapClient(httpClient, relayURL)
+			httpClient = relayWrapClient(httpClient, relayURL)
 			// Cache the client (fully wrapped, so every checkout shares the
 			// relay-wrapped transport for this cache key).
 			httpClientCacheMutex.Lock()

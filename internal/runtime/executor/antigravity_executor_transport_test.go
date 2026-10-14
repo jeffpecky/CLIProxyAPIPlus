@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -1036,5 +1037,30 @@ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) 
 	}
 	if trPooled.MaxIdleConnsPerHost != antigravityDefaultMaxIdleConnsPerHost {
 		t.Fatalf("pooled transport MaxIdleConnsPerHost = %d, want %d", trPooled.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
+	}
+}
+
+func TestAntigravityRelayClientWrapsOnceAndIsNilSafe(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RelayURL = "https://relay-ag-test.example.workers.dev"
+
+	base := &http.Client{}
+	wrapped := antigravityRelayClient(base, cfg)
+	if wrapped.Transport == nil || !proxyutil.IsRelayRoundTripper(wrapped.Transport) {
+		t.Fatalf("first wrap transport %T is not relay-wrapped", wrapped.Transport)
+	}
+	relayTransport := wrapped.Transport
+
+	// A second call must not double-wrap: double-wrapping would clobber the
+	// x-relay-target header set by the outer wrapper (data corruption).
+	again := antigravityRelayClient(wrapped, cfg)
+	if again.Transport != relayTransport {
+		t.Fatalf("second call re-wrapped: transport changed from %T to %T", relayTransport, again.Transport)
+	}
+
+	// Nil cfg is a no-op returning the base client untouched.
+	plain := &http.Client{}
+	if got := antigravityRelayClient(plain, nil); got != plain || plain.Transport != nil {
+		t.Fatalf("nil cfg must be a no-op, got client %p transport %T", got, plain.Transport)
 	}
 }

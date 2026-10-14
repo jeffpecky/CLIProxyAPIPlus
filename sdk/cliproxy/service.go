@@ -45,6 +45,12 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// roundTripperProvider is the per-auth RoundTripper provider currently
+	// attached to coreManager. It is tracked so hot config reloads can
+	// re-attach a fresh provider when relay-url changes (see
+	// applyManagerConfig); field access is serialized by configRuntimeMu.
+	roundTripperProvider *defaultRoundTripperProvider
+
 	// configPath is the path to the configuration file.
 	configPath string
 
