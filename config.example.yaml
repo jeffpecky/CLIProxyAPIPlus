@@ -184,6 +184,11 @@ redis-usage-queue-retention-seconds: 60
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# Edge relay URL. When set, outbound HTTPS requests (providers) are forwarded
+# through the relay worker at this URL using x-relay-target/x-relay-path headers.
+# Managed by the CCS dashboard; leave empty for direct egress.
+relay-url: ""
+
 # Qoder provider settings. Leave vpc-endpoint empty for the public global service.
 # Qoder CN Enterprise VPC accepts an instance name or its dedicated domain,
 # for example "acme" or "acme.vpc.qoder.com.cn". Do not include https:// or a path.

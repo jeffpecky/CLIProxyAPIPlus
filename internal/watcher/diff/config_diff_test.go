@@ -491,6 +491,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
+			RelayURL:   "https://relay-old.example.workers.dev",
 			APIKeys:    []string{" keyA "},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"a"}},
@@ -540,6 +541,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:             true,
 			ProxyURL:               "http://new-proxy",
+			RelayURL:               "https://relay-new.example.workers.dev",
 			APIKeys:                []string{"keyB"},
 			DisableImageGeneration: config.DisableImageGenerationAll,
 		},
@@ -574,6 +576,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "max-retry-credentials: 1 -> 3")
 	expectContains(t, changes, "max-retry-interval: 1 -> 3")
 	expectContains(t, changes, "proxy-url: http://old-proxy -> http://new-proxy")
+	expectContains(t, changes, "relay-url: https://relay-old.example.workers.dev -> https://relay-new.example.workers.dev")
 	expectContains(t, changes, "ws-auth: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-preview-model: false -> true")

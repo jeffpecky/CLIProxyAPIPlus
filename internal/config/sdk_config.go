@@ -12,6 +12,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// RelayURL optionally forwards outbound HTTPS requests through an edge relay
+	// worker (x-relay-target/x-relay-path protocol). Empty disables the relay.
+	RelayURL string `yaml:"relay-url" json:"relay-url"`
+
 	// Qoder configures provider-wide Qoder request behavior.
 	Qoder QoderConfig `yaml:"qoder" json:"qoder"`
 
