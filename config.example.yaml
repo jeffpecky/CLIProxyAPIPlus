@@ -187,6 +187,7 @@ proxy-url: ""
 # Edge relay URL. When set, outbound HTTPS requests (providers) are forwarded
 # through the relay worker at this URL using x-relay-target/x-relay-path headers.
 # Managed by the CCS dashboard; leave empty for direct egress.
+# Keep it to scheme://host/path — no query or credentials (they're ignored; see WrapRelay doc).
 relay-url: ""
 
 # Qoder provider settings. Leave vpc-endpoint empty for the public global service.

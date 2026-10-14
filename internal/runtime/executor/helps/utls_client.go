@@ -394,6 +394,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			fallback:  standardTransport,
 		},
 	}
+	if cfg != nil && strings.TrimSpace(cfg.RelayURL) != "" {
+		client.Transport = proxyutil.WrapRelay(client.Transport, strings.TrimSpace(cfg.RelayURL))
+	}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}

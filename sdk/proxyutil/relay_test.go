@@ -373,6 +373,27 @@ func TestWrapRelayPreservesRelayPathPrefix(t *testing.T) {
 	}
 }
 
+func TestIsRelayRoundTripper(t *testing.T) {
+	t.Parallel()
+
+	if IsRelayRoundTripper(nil) {
+		t.Fatal("nil must not report as a relay roundtripper")
+	}
+	if IsRelayRoundTripper(http.DefaultTransport) {
+		t.Fatal("http.DefaultTransport must not report as a relay roundtripper")
+	}
+	rec := &recordingRT{}
+	if IsRelayRoundTripper(rec) {
+		t.Fatal("an arbitrary roundtripper must not report as a relay roundtripper")
+	}
+	if IsRelayRoundTripper(WrapRelay(rec, "")) {
+		t.Fatal("an identity WrapRelay result must not report as a relay roundtripper")
+	}
+	if !IsRelayRoundTripper(WrapRelay(rec, "https://relay.example.com")) {
+		t.Fatal("a WrapRelay-wrapped roundtripper must report as a relay roundtripper")
+	}
+}
+
 func TestWrapRelayIgnoresRelayURLQueryAndUserinfo(t *testing.T) {
 	t.Parallel()
 

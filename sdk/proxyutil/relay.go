@@ -57,6 +57,14 @@ func (r *relayRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return r.base.RoundTrip(clone)
 }
 
+// IsRelayRoundTripper reports whether rt was produced by WrapRelay. Callers use
+// it to detect an already-relayed transport (e.g. to avoid double-wrapping or
+// to assert relay wiring in tests) without exporting the wrapper type.
+func IsRelayRoundTripper(rt http.RoundTripper) bool {
+	_, ok := rt.(*relayRoundTripper)
+	return ok
+}
+
 func (r *relayRoundTripper) shouldRelay(target *url.URL) bool {
 	if target.Scheme != "https" || target.Host == "" {
 		return false

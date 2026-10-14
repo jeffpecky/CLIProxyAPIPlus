@@ -30,6 +30,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -228,60 +229,73 @@ func logRetryAttempt(attempt, maxRetries int, reason string, delay time.Duration
 		attempt+1, maxRetries, reason, delay, endpoint)
 }
 
-// kiroHTTPClientPool provides a shared HTTP client with connection pooling for Kiro API.
+// kiroHTTPClientPool provides shared HTTP clients with connection pooling for Kiro API.
 // This reduces connection overhead and improves performance for concurrent requests.
-// Based on kiro2Api's connection pooling pattern.
+// Based on kiro2Api's connection pooling pattern. Clients are keyed by relay URL
+// so a relay toggle never reuses a pooled client built for the other setting.
 var (
-	kiroHTTPClientPool     *http.Client
-	kiroHTTPClientPoolOnce sync.Once
-	kiroSleep              = time.Sleep
-	kiroHumanDelay         = kiroauth.ApplyHumanLikeDelay
+	kiroHTTPClientPool   = make(map[string]*http.Client)
+	kiroHTTPClientPoolMu sync.Mutex
+	kiroSleep            = time.Sleep
+	kiroHumanDelay       = kiroauth.ApplyHumanLikeDelay
 )
 
 // getKiroPooledHTTPClient returns a shared HTTP client with optimized connection pooling.
-// The client is lazily initialized on first use and reused across requests.
+// The client is lazily initialized per relay URL on first use and reused across requests.
 // This is especially beneficial for:
 // - Reducing TCP handshake overhead
 // - Enabling HTTP/2 multiplexing
 // - Better handling of keep-alive connections
-func getKiroPooledHTTPClient() *http.Client {
-	kiroHTTPClientPoolOnce.Do(func() {
-		transport := &http.Transport{
-			// Connection pool settings
-			MaxIdleConns:        100,              // Max idle connections across all hosts
-			MaxIdleConnsPerHost: 20,               // Max idle connections per host
-			MaxConnsPerHost:     50,               // Max total connections per host
-			IdleConnTimeout:     90 * time.Second, // How long idle connections stay in pool
+func getKiroPooledHTTPClient(relayURL string) *http.Client {
+	kiroHTTPClientPoolMu.Lock()
+	defer kiroHTTPClientPoolMu.Unlock()
+	if client, ok := kiroHTTPClientPool[relayURL]; ok {
+		return client
+	}
 
-			// Timeouts for connection establishment
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // TCP connection timeout
-				KeepAlive: 30 * time.Second, // TCP keep-alive interval
-			}).DialContext,
+	transport := &http.Transport{
+		// Connection pool settings
+		MaxIdleConns:        100,              // Max idle connections across all hosts
+		MaxIdleConnsPerHost: 20,               // Max idle connections per host
+		MaxConnsPerHost:     50,               // Max total connections per host
+		IdleConnTimeout:     90 * time.Second, // How long idle connections stay in pool
 
-			// TLS handshake timeout
-			TLSHandshakeTimeout: 10 * time.Second,
+		// Timeouts for connection establishment
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second, // TCP connection timeout
+			KeepAlive: 30 * time.Second, // TCP keep-alive interval
+		}).DialContext,
 
-			// Response header timeout
-			ResponseHeaderTimeout: 30 * time.Second,
+		// TLS handshake timeout
+		TLSHandshakeTimeout: 10 * time.Second,
 
-			// Expect 100-continue timeout
-			ExpectContinueTimeout: 1 * time.Second,
+		// Response header timeout
+		ResponseHeaderTimeout: 30 * time.Second,
 
-			// Enable HTTP/2 when available
-			ForceAttemptHTTP2: true,
-		}
+		// Expect 100-continue timeout
+		ExpectContinueTimeout: 1 * time.Second,
 
-		kiroHTTPClientPool = &http.Client{
-			Transport: transport,
-			// No global timeout - let individual requests set their own timeouts via context
-		}
+		// Enable HTTP/2 when available
+		ForceAttemptHTTP2: true,
+	}
 
-		log.Debugf("kiro: initialized pooled HTTP client (MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
-			transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
-	})
+	// Relay-wrap once at pool creation (never per checkout) so pooled clients
+	// for different relay settings stay isolated.
+	var pooledTransport http.RoundTripper = transport
+	if relayURL != "" {
+		pooledTransport = proxyutil.WrapRelay(transport, relayURL)
+	}
 
-	return kiroHTTPClientPool
+	client := &http.Client{
+		Transport: pooledTransport,
+		// No global timeout - let individual requests set their own timeouts via context
+	}
+	kiroHTTPClientPool[relayURL] = client
+
+	log.Debugf("kiro: initialized pooled HTTP client (relay=%q, MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
+		relayURL, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
+
+	return client
 }
 
 // newKiroHTTPClientWithPooling creates an HTTP client that uses connection pooling when appropriate.
@@ -303,8 +317,13 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 		return newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	}
 
-	// No proxy - use pooled client for better performance
-	pooledClient := getKiroPooledHTTPClient()
+	// No proxy - use pooled client for better performance. The relay URL is
+	// part of the pool key so relay toggles never share a pooled client.
+	var relayURL string
+	if cfg != nil {
+		relayURL = strings.TrimSpace(cfg.RelayURL)
+	}
+	pooledClient := getKiroPooledHTTPClient(relayURL)
 
 	// If timeout is specified, we need to wrap the pooled transport with timeout
 	if timeout > 0 {
@@ -4149,7 +4168,7 @@ type webSearchHandler struct {
 
 // newWebSearchHandler creates a new webSearchHandler.
 // If httpClient is nil, a default client with 30s timeout is used.
-// Pass a shared pooled client (e.g. from getKiroPooledHTTPClient) for connection reuse.
+// Pass a shared pooled client (e.g. from getKiroPooledHTTPClient("")) for connection reuse.
 func newWebSearchHandler(ctx context.Context, mcpEndpoint, authToken string, httpClient *http.Client, auth *cliproxyauth.Auth, authAttrs map[string]string) *webSearchHandler {
 	if httpClient == nil {
 		httpClient = &http.Client{
