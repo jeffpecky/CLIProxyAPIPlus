@@ -12,6 +12,7 @@ import (
 
 // recordingRT records the request it receives and returns an empty 200
 // response without ever touching the network.
+// single-goroutine only: driven by direct RoundTrip calls, never an http.Client.
 type recordingRT struct {
 	got *http.Request
 }
@@ -26,45 +27,78 @@ func (rc *recordingRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-func TestWrapRelayRewritesHTTPSAndInjectsHeaders(t *testing.T) {
-	t.Parallel()
+// protocolEmulation is a fully loopback stand-in for the edge relay: an
+// upstream TLS server plus a relay TLS server that composes target+path from
+// the x-relay-target/x-relay-path headers and forwards to the upstream, the
+// same way the deployed worker does. No test traffic ever leaves loopback.
+// Reuse this pattern when testing relay wiring at other call sites.
+type protocolEmulation struct {
+	upstream *httptest.Server
+	relayed  *httptest.Server
 
-	var mu sync.Mutex
-	var relayTarget, relayPath string
-	var upRequestURI string
-	var upHeader http.Header
-	var upBody []byte
+	mu          sync.Mutex
+	relayTarget string
+	relayPath   string
+	upURI       string
+	upHeader    http.Header
+	upBody      []byte
+}
 
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// relayEmulationRecord is a consistent snapshot of what each server saw.
+type relayEmulationRecord struct {
+	relayTarget string
+	relayPath   string
+	upURI       string
+	upHeader    http.Header
+	upBody      []byte
+}
+
+func (e *protocolEmulation) record() relayEmulationRecord {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return relayEmulationRecord{
+		relayTarget: e.relayTarget,
+		relayPath:   e.relayPath,
+		upURI:       e.upURI,
+		upHeader:    e.upHeader,
+		upBody:      e.upBody,
+	}
+}
+
+func newProtocolEmulation(t *testing.T) *protocolEmulation {
+	t.Helper()
+
+	em := &protocolEmulation{}
+	em.upstream = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		upRequestURI = r.URL.RequestURI()
-		upHeader = r.Header.Clone()
-		upBody = body
-		mu.Unlock()
+		em.mu.Lock()
+		em.upURI = r.URL.RequestURI()
+		em.upHeader = r.Header.Clone()
+		em.upBody = body
+		em.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("streamed"))
 	}))
-	defer upstream.Close()
+	t.Cleanup(em.upstream.Close)
 
-	relayed := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	em.relayed = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := r.Header.Get("x-relay-target")
 		path := r.Header.Get("x-relay-path")
-		mu.Lock()
-		relayTarget = target
-		relayPath = path
-		mu.Unlock()
+		em.mu.Lock()
+		em.relayTarget = target
+		em.relayPath = path
+		em.mu.Unlock()
 
 		// Compose the upstream URL exactly as a real relay worker does
 		// (target + path from the two headers), then redirect scheme/host to
-		// the local upstream test server — this test never dials the real
-		// Anthropic API or any other non-loopback address.
+		// the local upstream test server — this emulation never dials the
+		// real Anthropic API or any other non-loopback address.
 		upURL, errURL := url.Parse(target + path)
 		if errURL != nil {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		baseURL, errBase := url.Parse(upstream.URL)
+		baseURL, errBase := url.Parse(em.upstream.URL)
 		if errBase != nil {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -81,7 +115,7 @@ func TestWrapRelayRewritesHTTPSAndInjectsHeaders(t *testing.T) {
 		forward.Header.Del("x-relay-target")
 		forward.Header.Del("x-relay-path")
 		forward.Host = ""
-		resp, errRound := upstream.Client().Transport.RoundTrip(forward)
+		resp, errRound := em.upstream.Client().Transport.RoundTrip(forward)
 		if errRound != nil {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -94,9 +128,17 @@ func TestWrapRelayRewritesHTTPSAndInjectsHeaders(t *testing.T) {
 		buf, _ := io.ReadAll(resp.Body)
 		_, _ = w.Write(buf)
 	}))
-	defer relayed.Close()
+	t.Cleanup(em.relayed.Close)
 
-	client := &http.Client{Transport: WrapRelay(upstream.Client().Transport, relayed.URL)}
+	return em
+}
+
+func TestWrapRelayRewritesHTTPSAndInjectsHeaders(t *testing.T) {
+	t.Parallel()
+
+	em := newProtocolEmulation(t)
+
+	client := &http.Client{Transport: WrapRelay(em.upstream.Client().Transport, em.relayed.URL)}
 	resp, err := client.Post("https://api.anthropic.com/v1/messages?beta=true", "application/json", strings.NewReader(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -113,48 +155,46 @@ func TestWrapRelayRewritesHTTPSAndInjectsHeaders(t *testing.T) {
 		t.Fatalf("response body = %q, want %q", respBody, "streamed")
 	}
 
-	mu.Lock()
-	gotTarget := relayTarget
-	gotPath := relayPath
-	gotURI := upRequestURI
-	gotHeader := upHeader
-	gotUpBody := upBody
-	mu.Unlock()
+	rec := em.record()
 
 	// The relay worker received the two-header protocol with the query intact.
-	if gotTarget != "https://api.anthropic.com" {
-		t.Fatalf("x-relay-target = %q, want %q", gotTarget, "https://api.anthropic.com")
+	if rec.relayTarget != "https://api.anthropic.com" {
+		t.Fatalf("x-relay-target = %q, want %q", rec.relayTarget, "https://api.anthropic.com")
 	}
-	if gotPath != "/v1/messages?beta=true" {
-		t.Fatalf("x-relay-path = %q, want %q", gotPath, "/v1/messages?beta=true")
+	if rec.relayPath != "/v1/messages?beta=true" {
+		t.Fatalf("x-relay-path = %q, want %q", rec.relayPath, "/v1/messages?beta=true")
 	}
 
 	// The upstream saw the composed target+path, stripped relay headers,
 	// and the untouched request body.
-	if gotURI == "" {
+	if rec.upURI == "" {
 		t.Fatal("upstream never reached")
 	}
-	if gotURI != "/v1/messages?beta=true" {
-		t.Fatalf("upstream request URI = %q, want %q", gotURI, "/v1/messages?beta=true")
+	if rec.upURI != "/v1/messages?beta=true" {
+		t.Fatalf("upstream request URI = %q, want %q", rec.upURI, "/v1/messages?beta=true")
 	}
-	if gotHeader.Get("x-relay-target") != "" || gotHeader.Get("x-relay-path") != "" {
-		t.Fatalf("relay headers leaked upstream: %v", gotHeader)
+	if rec.upHeader.Get("x-relay-target") != "" || rec.upHeader.Get("x-relay-path") != "" {
+		t.Fatalf("relay headers leaked upstream: %v", rec.upHeader)
 	}
-	if string(gotUpBody) != `{"x":1}` {
-		t.Fatalf("upstream body = %q, want %q", gotUpBody, `{"x":1}`)
+	if string(rec.upBody) != `{"x":1}` {
+		t.Fatalf("upstream body = %q, want %q", rec.upBody, `{"x":1}`)
 	}
 }
 
 func TestWrapRelayBypassesLoopbackAndNonHTTPS(t *testing.T) {
 	t.Parallel()
 
-	const relayURL = "https://relay.example.workers.dev"
+	const relayURL = "https://relay.example.com"
 	targets := []string{
 		"http://127.0.0.1:8317/v1",
 		"http://localhost:11434/x",
 		"http://example.com/x",
+		"https://localhost:8443/x",
+		"https://127.0.0.1:8443/x",
+		"https://LOCALHOST:8443/x",
 		"https://[::1]:8443/x",
-		"https://relay.example.workers.dev/anything", // aimed at the relay itself
+		"https://relay.example.com/anything", // aimed at the relay itself
+		"https://RELAY.EXAMPLE.COM/x",        // self-loop, case-differing host
 	}
 	for _, target := range targets {
 		rec := &recordingRT{}
@@ -177,6 +217,40 @@ func TestWrapRelayBypassesLoopbackAndNonHTTPS(t *testing.T) {
 		if rec.got.Header.Get("x-relay-path") != "" {
 			t.Fatalf("x-relay-path set for bypass target %s: %q", target, rec.got.Header.Get("x-relay-path"))
 		}
+	}
+}
+
+func TestWrapRelayNilGuards(t *testing.T) {
+	t.Parallel()
+
+	// A URL-less request passes through to the base untouched (the base,
+	// like the stdlib Transport, produces the malformed-request error).
+	rec := &recordingRT{}
+	rt := WrapRelay(rec, "https://relay.example.com")
+	req := &http.Request{Method: http.MethodGet, Header: make(http.Header)}
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if rec.got != req {
+		t.Fatal("nil-URL request must pass through untouched")
+	}
+
+	// A nil-header request still gets the relay headers injected.
+	recHeader := &recordingRT{}
+	rtHeader := WrapRelay(recHeader, "https://relay.example.com")
+	reqHeader, errNew := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1/x", nil)
+	if errNew != nil {
+		t.Fatalf("new request: %v", errNew)
+	}
+	reqHeader.Header = nil
+	if _, errRT := rtHeader.RoundTrip(reqHeader); errRT != nil {
+		t.Fatalf("RoundTrip with nil header: %v", errRT)
+	}
+	if recHeader.got == nil {
+		t.Fatal("base transport never reached for nil-header request")
+	}
+	if recHeader.got.Header.Get("x-relay-target") != "https://api.anthropic.com" {
+		t.Fatalf("x-relay-target = %q, want %q", recHeader.got.Header.Get("x-relay-target"), "https://api.anthropic.com")
 	}
 }
 
@@ -296,5 +370,37 @@ func TestWrapRelayPreservesRelayPathPrefix(t *testing.T) {
 	}
 	if selfReq.Header.Get("x-relay-target") != "" {
 		t.Fatalf("x-relay-target set on self-loop request: %q", selfReq.Header.Get("x-relay-target"))
+	}
+}
+
+func TestWrapRelayIgnoresRelayURLQueryAndUserinfo(t *testing.T) {
+	t.Parallel()
+
+	// Pins the documented caveat: a query string or userinfo on the relay URL
+	// is dropped — only the target's query rides on the relay request line.
+	cases := []struct {
+		name     string
+		relayURL string
+		want     string
+	}{
+		{"query dropped", "https://relay.example.com?token=abc", "https://relay.example.com/v1/x?beta=true"},
+		{"userinfo dropped", "https://user:pass@relay.example.com", "https://relay.example.com/v1/x?beta=true"},
+	}
+	for _, tc := range cases {
+		rec := &recordingRT{}
+		rt := WrapRelay(rec, tc.relayURL)
+		req, errReq := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1/x?beta=true", nil)
+		if errReq != nil {
+			t.Fatalf("%s: new request: %v", tc.name, errReq)
+		}
+		if _, errRT := rt.RoundTrip(req); errRT != nil {
+			t.Fatalf("%s: RoundTrip: %v", tc.name, errRT)
+		}
+		if rec.got == nil {
+			t.Fatalf("%s: base transport never reached", tc.name)
+		}
+		if got := rec.got.URL.String(); got != tc.want {
+			t.Fatalf("%s: relay request URL = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
