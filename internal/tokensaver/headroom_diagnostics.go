@@ -130,6 +130,22 @@ func intNumber(value any) int {
 	}
 }
 
+// isPhantomHeadroomSavings reports a claimed token delta that the outbound body
+// does not back up. Both the whole body and the messages must fail to shrink, so
+// large unchanged tool schemas cannot mask healthy message compression. The
+// message check still lets Claude top-level system-prompt savings register.
 func isPhantomHeadroomSavings(stats HeadroomStats, before, after SizeSnapshot) bool {
-	return stats.TokensSaved > 0 && before.BodyBytes > 0 && after.BodyBytes > 0 && float64(after.BodyBytes) >= float64(before.BodyBytes)*0.95
+	if stats.TokensSaved <= 0 {
+		return false
+	}
+	for _, pair := range [][2]int{
+		{before.BodyBytes, after.BodyBytes},
+		{before.MessageBytes, after.MessageBytes},
+	} {
+		original, compressed := pair[0], pair[1]
+		if original <= 0 || compressed <= 0 || float64(compressed) < float64(original)*0.95 {
+			return false
+		}
+	}
+	return true
 }

@@ -34,9 +34,10 @@ func (h *BaseAPIHandler) tokenSaverFinalHook(inboundHeaders http.Header) coreexe
 				"tokens_after": stats.HeadroomStats.TokensAfter, "tokens_saved": stats.HeadroomStats.TokensSaved,
 				"ratio": stats.HeadroomStats.Ratio, "transforms": stats.HeadroomStats.Transforms,
 				"body_bytes_before": stats.HeadroomBefore.BodyBytes, "body_bytes_after": stats.HeadroomAfter.BodyBytes,
+				"message_bytes_before": stats.HeadroomBefore.MessageBytes, "message_bytes_after": stats.HeadroomAfter.MessageBytes,
 			}
 			if stats.HeadroomPhantom {
-				log.WithFields(fields).Warn("headroom reported token savings but request body shrank less than 5 percent")
+				log.WithFields(fields).Warn("headroom reported token savings but messages and request body shrank less than 5 percent")
 			} else {
 				log.WithFields(fields).Debug("headroom compression applied")
 			}

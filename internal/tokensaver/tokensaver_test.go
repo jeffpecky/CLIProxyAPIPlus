@@ -351,11 +351,27 @@ func TestHeadroomMasksEndpointAndReportsStats(t *testing.T) {
 }
 
 func TestHeadroomDetectsPhantomSavings(t *testing.T) {
-	if !isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, SizeSnapshot{BodyBytes: 100}, SizeSnapshot{BodyBytes: 97}) {
+	// Body and messages both barely shrink -> phantom.
+	phantomBefore := SizeSnapshot{BodyBytes: 100000, MessageBytes: 100}
+	phantomAfter := SizeSnapshot{BodyBytes: 97000, MessageBytes: 97}
+	if !isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, phantomBefore, phantomAfter) {
 		t.Fatal("expected phantom savings")
 	}
-	if isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, SizeSnapshot{BodyBytes: 100}, SizeSnapshot{BodyBytes: 80}) {
+	// Messages shrink -> real savings even though large tools keep the body flat.
+	if isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, SizeSnapshot{BodyBytes: 100000, MessageBytes: 1000}, SizeSnapshot{BodyBytes: 99500, MessageBytes: 500}) {
+		t.Fatal("unexpected phantom savings when messages shrink")
+	}
+	// Both shrink -> real savings.
+	if isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, SizeSnapshot{BodyBytes: 100, MessageBytes: 100}, SizeSnapshot{BodyBytes: 80, MessageBytes: 80}) {
 		t.Fatal("unexpected phantom savings")
+	}
+	// No positive token delta -> never phantom.
+	if isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 0}, phantomBefore, phantomAfter) {
+		t.Fatal("unexpected phantom savings without token delta")
+	}
+	// Missing message sizes cannot confirm phantom savings.
+	if isPhantomHeadroomSavings(HeadroomStats{TokensSaved: 10}, SizeSnapshot{BodyBytes: 100}, SizeSnapshot{BodyBytes: 97}) {
+		t.Fatal("unexpected phantom savings without message sizes")
 	}
 }
 
