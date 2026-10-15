@@ -3,11 +3,14 @@ package cliproxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
@@ -79,6 +82,91 @@ func TestApplyManagerConfigRefreshesRelayRoundTripperProvider(t *testing.T) {
 	if rt := service.roundTripperProvider.RoundTripperFor(auth); proxyutil.IsRelayRoundTripper(rt) {
 		t.Fatalf("transport %T still relay-wrapped after relay-url disabled", rt)
 	}
+}
+
+// setupRelayWarnHook attaches a capture hook to the standard logger so the
+// tests can assert on syncRoundTripperProvider's invalid relay-url warning.
+// Mirrors the auth package's setupTestLoggerHook idiom: capture at Warn,
+// restore level and hooks on cleanup. Not for parallel tests — it swaps the
+// standard logger's hook set.
+func setupRelayWarnHook(t *testing.T) *logtest.Hook {
+	t.Helper()
+	_, hook := logtest.NewNullLogger()
+	oldLevel := log.GetLevel()
+	log.SetLevel(log.WarnLevel)
+	savedHooks := make(log.LevelHooks)
+	for lvl, hs := range log.StandardLogger().Hooks {
+		savedHooks[lvl] = append([]log.Hook(nil), hs...)
+	}
+	log.AddHook(hook)
+	t.Cleanup(func() {
+		log.SetLevel(oldLevel)
+		log.StandardLogger().ReplaceHooks(savedHooks)
+	})
+	return hook
+}
+
+// TestSyncRoundTripperProviderWarnsOnInvalidRelayURL pins the service-layer
+// warning for a non-empty but malformed relay-url: WrapRelay degrades to
+// direct egress by design, so syncRoundTripperProvider must say so instead of
+// staying silent. A valid relay-url (and an empty one) must stay quiet.
+func TestSyncRoundTripperProviderWarnsOnInvalidRelayURL(t *testing.T) {
+	invalid := []string{
+		"ftp://relay.example.workers.dev", // scheme is not http/https
+		"https://",                        // parseable but host is empty
+		"http://[::1",                     // url.Parse error (missing ']')
+	}
+	for _, relay := range invalid {
+		t.Run("invalid "+relay, func(t *testing.T) {
+			hook := setupRelayWarnHook(t)
+			service := &Service{
+				coreManager: coreauth.NewManager(nil, nil, nil),
+			}
+			cfg := &internalconfig.Config{}
+			cfg.RelayURL = relay
+
+			hook.Reset()
+			service.syncRoundTripperProvider(cfg)
+
+			warns := 0
+			for _, entry := range hook.AllEntries() {
+				if entry.Level != log.WarnLevel || !strings.Contains(entry.Message, "invalid relay-url") {
+					continue
+				}
+				warns++
+				if !strings.Contains(entry.Message, strings.TrimSpace(relay)) {
+					t.Fatalf("warning %q does not quote the invalid relay-url %q", entry.Message, relay)
+				}
+				if !strings.Contains(entry.Message, "egress stays direct") {
+					t.Fatalf("warning %q does not state that egress stays direct", entry.Message)
+				}
+			}
+			if warns != 1 {
+				t.Fatalf("invalid relay-url warnings = %d, want 1; logs: %#v", warns, hook.AllEntries())
+			}
+		})
+	}
+
+	t.Run("valid relay-url stays silent", func(t *testing.T) {
+		hook := setupRelayWarnHook(t)
+		service := &Service{
+			coreManager: coreauth.NewManager(nil, nil, nil),
+		}
+		cfg := &internalconfig.Config{}
+		cfg.RelayURL = "https://relay.example.workers.dev"
+
+		hook.Reset()
+		service.syncRoundTripperProvider(cfg)
+
+		for _, entry := range hook.AllEntries() {
+			if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "invalid relay-url") {
+				t.Fatalf("valid relay-url must not warn, got: %s", entry.Message)
+			}
+		}
+		if service.roundTripperProvider == nil || service.roundTripperProvider.relayURL != cfg.RelayURL {
+			t.Fatalf("provider = %+v, want one scoped to %q", service.roundTripperProvider, cfg.RelayURL)
+		}
+	})
 }
 
 func TestRoundTripperProviderRelaySeparatesCacheAndWraps(t *testing.T) {

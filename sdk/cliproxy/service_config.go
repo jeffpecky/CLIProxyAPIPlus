@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"time"
 
@@ -249,6 +250,16 @@ func (s *Service) syncRoundTripperProvider(cfg *config.Config) {
 		return
 	}
 	relayURL := strings.TrimSpace(cfg.RelayURL)
+	// A non-empty but malformed relay-url degrades to direct egress inside
+	// WrapRelay (by design, pinned elsewhere) — say so instead of staying
+	// silent. Warn before the change-detection return below so a relay-url
+	// that was already invalid at Build time is still surfaced on reload.
+	if relayURL != "" {
+		if relay, errParse := url.Parse(relayURL); errParse != nil ||
+			(relay.Scheme != "http" && relay.Scheme != "https") || relay.Host == "" {
+			log.Warnf("invalid relay-url %q — egress stays direct", relayURL)
+		}
+	}
 	if s.roundTripperProvider != nil && s.roundTripperProvider.relayURL == relayURL {
 		return
 	}

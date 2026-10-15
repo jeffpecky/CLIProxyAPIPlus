@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -28,7 +27,6 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"golang.org/x/net/http2"
 )
 
 const (
@@ -339,7 +337,11 @@ func (e *CursorExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	return nil
 }
 
-// HttpRequest injects credentials and executes the request.
+// HttpRequest injects credentials and executes the request. Egress goes through
+// the canonical relay/proxy-aware factory so a configured relay-url applies to
+// Cursor HTTP requests too (http.DefaultClient previously bypassed the relay).
+// With no relay, no proxy, and no ctx-injected RoundTripper the factory returns
+// a bare client that uses http.DefaultTransport — same behavior as before.
 func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("cursor: request is nil")
@@ -347,7 +349,7 @@ func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if err := e.PrepareRequest(req, auth); err != nil {
 		return nil, err
 	}
-	return http.DefaultClient.Do(req)
+	return helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(req)
 }
 
 // CountTokens estimates token count locally using tiktoken.
@@ -1910,14 +1912,6 @@ func applyCursorHeaders(req *http.Request, accessToken string) {
 	req.Header.Set("X-Request-Id", uuid.New().String())
 }
 
-func newH2Client() *http.Client {
-	return &http.Client{
-		Transport: &http2.Transport{
-			TLSClientConfig: &tls.Config{},
-		},
-	}
-}
-
 // extractCCH extracts the cch value from the system prompt's billing header.
 func extractCCH(systemPrompt string) string {
 	idx := strings.Index(systemPrompt, "cch=")
@@ -2143,7 +2137,12 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return fetchCursorModels(ctx, authID, accessToken, newH2Client(), cursorAPIURL+cursorModelsPath)
+	// Relay-aware standard client instead of a raw http2.Transport: net/http
+	// negotiates h2 via ALPN when offered and falls back to HTTP/1.1 otherwise,
+	// so catalog refresh keeps working behind a relay endpoint that does not
+	// offer ALPN h2 (a raw h2.Transport would hard-fail there).
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	return fetchCursorModels(ctx, authID, accessToken, client, cursorAPIURL+cursorModelsPath)
 }
 
 func fetchCursorModels(ctx context.Context, authID, accessToken string, client *http.Client, modelsURL string) []*registry.ModelInfo {
