@@ -6,7 +6,6 @@ package cliproxy
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -267,11 +266,11 @@ func (b *Builder) Build() (*Service, error) {
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
-	providerRelayURL := ""
+	var relayPlan config.RelayPlan
 	if b.cfg != nil {
-		providerRelayURL = strings.TrimSpace(b.cfg.RelayURL)
+		relayPlan = b.cfg.RelayPlan()
 	}
-	roundTripperProvider := newDefaultRoundTripperProvider(providerRelayURL)
+	roundTripperProvider := newDefaultRoundTripperProvider(relayPlan)
 	coreManager.SetRoundTripperProvider(roundTripperProvider)
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)

@@ -14,7 +14,28 @@ type SDKConfig struct {
 
 	// RelayURL optionally forwards outbound HTTPS requests through an edge relay
 	// worker (x-relay-target/x-relay-path protocol). Empty disables the relay.
+	// It is the legacy single-candidate form of RelayURLs and only applies when
+	// RelayURLs is empty.
 	RelayURL string `yaml:"relay-url" json:"relay-url"`
+
+	// RelayURLs is the candidate relay list in priority order. When it holds more
+	// than one entry, RelayStrategy decides which candidate a request starts with
+	// and the rest serve as a failover tail. Empty falls back to RelayURL.
+	RelayURLs []string `yaml:"relay-urls,omitempty" json:"relay-urls,omitempty"`
+
+	// RelayStrategy selects the starting candidate for each request: "none"
+	// (default) always uses the first, "round-robin" advances one slot per
+	// request, and "random" picks a uniformly random slot.
+	RelayStrategy string `yaml:"relay-strategy,omitempty" json:"relay-strategy,omitempty"`
+
+	// RelayStrict fails closed: with no candidate relay resolved, external HTTPS
+	// requests error instead of egressing directly from the local IP.
+	RelayStrict bool `yaml:"relay-strict,omitempty" json:"relay-strict,omitempty"`
+
+	// RelayProviderURLs pins a single relay per provider, keyed by lower-cased
+	// provider name. A pin short-circuits the global candidate list for that
+	// provider only.
+	RelayProviderURLs map[string]string `yaml:"relay-provider-urls,omitempty" json:"relay-provider-urls,omitempty"`
 
 	// Qoder configures provider-wide Qoder request behavior.
 	Qoder QoderConfig `yaml:"qoder" json:"qoder"`

@@ -13,10 +13,17 @@ import (
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
+// relayPlan builds the plan a config carrying a single relay-url would
+// resolve, so tests keep expressing relay scope the way config files do.
+func relayPlan(relayURL string) internalconfig.RelayPlan {
+	cfg := &internalconfig.SDKConfig{RelayURL: relayURL}
+	return cfg.RelayPlan()
+}
+
 func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
 	t.Parallel()
 
-	provider := newDefaultRoundTripperProvider("")
+	provider := newDefaultRoundTripperProvider(internalconfig.RelayPlan{})
 	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "direct"})
 	transport, ok := rt.(*http.Transport)
 	if !ok {
@@ -35,7 +42,7 @@ func TestApplyManagerConfigRefreshesRelayRoundTripperProvider(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{
 		coreManager:          manager,
-		roundTripperProvider: newDefaultRoundTripperProvider("https://relay-a.example.workers.dev"),
+		roundTripperProvider: newDefaultRoundTripperProvider(relayPlan("https://relay-a.example.workers.dev")),
 	}
 	manager.SetRoundTripperProvider(service.roundTripperProvider)
 
@@ -53,8 +60,8 @@ func TestApplyManagerConfigRefreshesRelayRoundTripperProvider(t *testing.T) {
 	if provider == nil {
 		t.Fatal("roundTripperProvider not set after config apply")
 	}
-	if provider.relayURL != "https://relay-b.example.workers.dev" {
-		t.Fatalf("provider relay = %q, want %q", provider.relayURL, "https://relay-b.example.workers.dev")
+	if provider.plan.Key() != newCfg.RelayPlan().Key() {
+		t.Fatalf("provider relay plan = %q, want %q", provider.plan.Key(), newCfg.RelayPlan().Key())
 	}
 	if rt := provider.RoundTripperFor(auth); !proxyutil.IsRelayRoundTripper(rt) {
 		t.Fatalf("provider transport %T is not relay-wrapped after relay change", rt)
@@ -163,7 +170,7 @@ func TestSyncRoundTripperProviderWarnsOnInvalidRelayURL(t *testing.T) {
 				t.Fatalf("valid relay-url must not warn, got: %s", entry.Message)
 			}
 		}
-		if service.roundTripperProvider == nil || service.roundTripperProvider.relayURL != cfg.RelayURL {
+		if service.roundTripperProvider == nil || service.roundTripperProvider.plan.Key() != cfg.RelayPlan().Key() {
 			t.Fatalf("provider = %+v, want one scoped to %q", service.roundTripperProvider, cfg.RelayURL)
 		}
 	})
@@ -175,9 +182,9 @@ func TestRoundTripperProviderRelaySeparatesCacheAndWraps(t *testing.T) {
 	const proxyURL = "http://rtprovider-relay-proxy.example:8080"
 	auth := &coreauth.Auth{ProxyURL: proxyURL}
 
-	plain := newDefaultRoundTripperProvider("")
-	relayed := newDefaultRoundTripperProvider("https://relay.example.workers.dev")
-	other := newDefaultRoundTripperProvider("https://other-relay.example.workers.dev")
+	plain := newDefaultRoundTripperProvider(relayPlan(""))
+	relayed := newDefaultRoundTripperProvider(relayPlan("https://relay.example.workers.dev"))
+	other := newDefaultRoundTripperProvider(relayPlan("https://other-relay.example.workers.dev"))
 
 	plainRT := plain.RoundTripperFor(auth)
 	relayedRT := relayed.RoundTripperFor(auth)

@@ -5,7 +5,6 @@ package util
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -27,12 +26,12 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if transport != nil {
 		httpClient.Transport = transport
 	}
-	if relayURL := strings.TrimSpace(cfg.RelayURL); relayURL != "" {
+	if opts := cfg.RelayPlan().Options(""); len(opts.URLs) > 0 || opts.Strict {
 		base := httpClient.Transport
 		if base == nil {
 			base = http.DefaultTransport
 		}
-		httpClient.Transport = proxyutil.WrapRelay(base, relayURL)
+		httpClient.Transport = proxyutil.WrapRelayWith(base, opts)
 	}
 	return httpClient
 }

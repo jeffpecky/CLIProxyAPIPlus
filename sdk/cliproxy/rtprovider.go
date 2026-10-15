@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -12,17 +13,18 @@ import (
 
 // defaultRoundTripperProvider returns a per-auth HTTP RoundTripper based on
 // the Auth.ProxyURL value. It caches transports per proxy URL string, scoped
-// by the configured edge relay URL so relay toggles never share a transport.
+// by the resolved relay plan so relay toggles, rotation changes, and
+// per-provider pins never share a transport.
 type defaultRoundTripperProvider struct {
-	mu       sync.RWMutex
-	cache    map[string]http.RoundTripper
-	relayURL string
+	mu    sync.RWMutex
+	cache map[string]http.RoundTripper
+	plan  config.RelayPlan
 }
 
-func newDefaultRoundTripperProvider(relayURL string) *defaultRoundTripperProvider {
+func newDefaultRoundTripperProvider(plan config.RelayPlan) *defaultRoundTripperProvider {
 	return &defaultRoundTripperProvider{
-		cache:    make(map[string]http.RoundTripper),
-		relayURL: strings.TrimSpace(relayURL),
+		cache: make(map[string]http.RoundTripper),
+		plan:  plan,
 	}
 }
 
@@ -35,9 +37,12 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if proxyStr == "" {
 		return nil
 	}
-	// The relay is part of the transport's identity: key on proxy + relay so a
-	// cached relay-wrapped or plain transport cannot leak across relay toggles.
-	cacheKey := proxyStr + "|" + p.relayURL
+	providerKey := coreauth.ProviderKey(auth)
+	relayOpts := p.plan.Options(providerKey)
+	// The relay plan is part of the transport's identity: key on proxy + relay
+	// identity so a cached relay-wrapped or plain transport cannot leak across
+	// relay toggles, strategy edits, or provider pins.
+	cacheKey := proxyStr + "|" + p.plan.Identity(providerKey)
 	p.mu.RLock()
 	rt := p.cache[cacheKey]
 	p.mu.RUnlock()
@@ -53,8 +58,8 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 		return nil
 	}
 	var transport http.RoundTripper = built
-	if p.relayURL != "" {
-		transport = proxyutil.WrapRelay(built, p.relayURL)
+	if len(relayOpts.URLs) > 0 || relayOpts.Strict {
+		transport = proxyutil.WrapRelayWith(built, relayOpts)
 	}
 	p.mu.Lock()
 	p.cache[cacheKey] = transport

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -87,6 +88,18 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if oldCfg.RelayURL != newCfg.RelayURL {
 		changes = append(changes, fmt.Sprintf("relay-url: %s -> %s", formatProxyURL(oldCfg.RelayURL), formatProxyURL(newCfg.RelayURL)))
+	}
+	if !reflect.DeepEqual(oldCfg.RelayURLs, newCfg.RelayURLs) {
+		changes = append(changes, fmt.Sprintf("relay-urls: %s -> %s", formatRelayURLs(oldCfg.RelayURLs), formatRelayURLs(newCfg.RelayURLs)))
+	}
+	if oldCfg.RelayStrategy != newCfg.RelayStrategy {
+		changes = append(changes, fmt.Sprintf("relay-strategy: %q -> %q", oldCfg.RelayStrategy, newCfg.RelayStrategy))
+	}
+	if oldCfg.RelayStrict != newCfg.RelayStrict {
+		changes = append(changes, fmt.Sprintf("relay-strict: %t -> %t", oldCfg.RelayStrict, newCfg.RelayStrict))
+	}
+	if !reflect.DeepEqual(oldCfg.RelayProviderURLs, newCfg.RelayProviderURLs) {
+		changes = append(changes, fmt.Sprintf("relay-provider-urls: %s -> %s", formatRelayPins(oldCfg.RelayProviderURLs), formatRelayPins(newCfg.RelayProviderURLs)))
 	}
 	if oldCfg.WebsocketAuth != newCfg.WebsocketAuth {
 		changes = append(changes, fmt.Sprintf("ws-auth: %t -> %t", oldCfg.WebsocketAuth, newCfg.WebsocketAuth))
@@ -634,6 +647,38 @@ func displayOptionalValue(raw string) string {
 
 func formatProxyURL(raw string) string {
 	return formatURL(raw)
+}
+
+// formatRelayURLs renders a relay candidate list the way formatProxyURL
+// renders a single URL, keeping change logs free of raw credentials or query
+// strings a relay URL might carry.
+func formatRelayURLs(raw []string) string {
+	if len(raw) == 0 {
+		return "<none>"
+	}
+	formatted := make([]string, 0, len(raw))
+	for _, one := range raw {
+		formatted = append(formatted, formatProxyURL(one))
+	}
+	return strings.Join(formatted, ", ")
+}
+
+// formatRelayPins renders per-provider relay pins as provider=<url> pairs in
+// sorted order so diffs are stable across map iteration.
+func formatRelayPins(pins map[string]string) string {
+	if len(pins) == 0 {
+		return "<none>"
+	}
+	providers := make([]string, 0, len(pins))
+	for provider := range pins {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	formatted := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		formatted = append(formatted, provider+"="+formatProxyURL(pins[provider]))
+	}
+	return strings.Join(formatted, ", ")
 }
 
 func formatURL(raw string) string {

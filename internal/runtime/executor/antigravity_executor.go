@@ -442,7 +442,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// existing lifecycle and different OAuth identities remain isolated.
 	if proxyURL := antigravityProxyURL(ctx, cfg, auth); proxyURL != "" {
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
-			return antigravityRelayClient(&http.Client{Transport: transport, Timeout: timeout}, cfg)
+			return antigravityRelayClient(&http.Client{Transport: transport, Timeout: timeout}, cfg, auth)
 		}
 		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
 		// context transport fallback, preserving the previous behavior.
@@ -452,7 +452,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
-		return antigravityRelayClient(client, cfg)
+		return antigravityRelayClient(client, cfg, auth)
 	}
 
 	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
@@ -472,25 +472,26 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		transport = antigravityBaseTransport
 	}
 	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
-	return antigravityRelayClient(client, cfg)
+	return antigravityRelayClient(client, cfg, auth)
 }
 
 // antigravityRelayClient wraps the client's transport through the edge relay
-// when cfg enables one. It is a no-op when relay-url is empty or the transport
-// is already relay-wrapped, keeping zero-relay behavior byte-identical.
-func antigravityRelayClient(client *http.Client, cfg *config.Config) *http.Client {
+// when cfg enables one for auth's provider. It is a no-op when the relay plan
+// resolves to no candidates or the transport is already relay-wrapped, keeping
+// zero-relay behavior byte-identical.
+func antigravityRelayClient(client *http.Client, cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
 	if cfg == nil {
 		return client
 	}
-	relayURL := strings.TrimSpace(cfg.RelayURL)
-	if relayURL == "" || proxyutil.IsRelayRoundTripper(client.Transport) {
+	opts := cfg.RelayPlan().Options(cliproxyauth.ProviderKey(auth))
+	if (len(opts.URLs) == 0 && !opts.Strict) || proxyutil.IsRelayRoundTripper(client.Transport) {
 		return client
 	}
 	base := client.Transport
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	client.Transport = proxyutil.WrapRelay(base, relayURL)
+	client.Transport = proxyutil.WrapRelayWith(base, opts)
 	return client
 }
 

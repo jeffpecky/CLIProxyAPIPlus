@@ -12,6 +12,7 @@ import (
 	"time"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -758,8 +759,11 @@ func TestKiroContextUsageFallbackAppliesWhenPreciseTokenUsageMissing(t *testing.
 }
 
 func TestKiroPooledHTTPClientKeyedByRelay(t *testing.T) {
-	plain := getKiroPooledHTTPClient("")
-	relayed := getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev")
+	plainKey, plainOpts := kiroRelayScope("")
+	relayKey, relayOpts := kiroRelayScope("https://relay-kiro-test.example.workers.dev")
+
+	plain := getKiroPooledHTTPClient(plainKey, plainOpts)
+	relayed := getKiroPooledHTTPClient(relayKey, relayOpts)
 	if plain == relayed {
 		t.Fatal("relay and non-relay checkouts share a pooled client")
 	}
@@ -771,10 +775,10 @@ func TestKiroPooledHTTPClientKeyedByRelay(t *testing.T) {
 	}
 
 	// Same-key identity: repeat checkouts must return the same client pointer.
-	if again := getKiroPooledHTTPClient(""); again != plain {
+	if again := getKiroPooledHTTPClient(plainKey, plainOpts); again != plain {
 		t.Fatal("same relay key (\"\") did not return the pooled client")
 	}
-	if again := getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev"); again != relayed {
+	if again := getKiroPooledHTTPClient(relayKey, relayOpts); again != relayed {
 		t.Fatal("same relay key did not return the pooled client")
 	}
 
@@ -788,11 +792,11 @@ func TestKiroPooledHTTPClientKeyedByRelay(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			seen <- getKiroPooledHTTPClient("")
+			seen <- getKiroPooledHTTPClient(plainKey, plainOpts)
 		}()
 		go func() {
 			defer wg.Done()
-			seen <- getKiroPooledHTTPClient("https://relay-kiro-test.example.workers.dev")
+			seen <- getKiroPooledHTTPClient(relayKey, relayOpts)
 		}()
 	}
 	wg.Wait()
@@ -802,4 +806,13 @@ func TestKiroPooledHTTPClientKeyedByRelay(t *testing.T) {
 			t.Fatalf("concurrent checkout returned unexpected client %p", client)
 		}
 	}
+}
+
+// kiroRelayScope mirrors how newKiroHTTPClientWithPooling derives the pool key
+// and the relay options from a config carrying a single relay-url.
+func kiroRelayScope(relayURL string) (string, proxyutil.RelayOptions) {
+	cfg := &config.Config{}
+	cfg.RelayURL = relayURL
+	plan := cfg.RelayPlan()
+	return plan.Identity(""), plan.Options("")
 }

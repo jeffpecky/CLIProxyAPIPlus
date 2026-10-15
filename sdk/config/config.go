@@ -10,6 +10,10 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+// RelayPlan is a snapshot of the relay settings that drive transport
+// construction; see internal/config.RelayPlan.
+type RelayPlan = internalconfig.RelayPlan
+
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig

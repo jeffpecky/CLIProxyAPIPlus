@@ -190,6 +190,32 @@ proxy-url: ""
 # Keep it to scheme://host/path — no query or credentials (they're ignored; see WrapRelay doc).
 relay-url: ""
 
+# Candidate relay list in priority order. Takes precedence over relay-url when
+# non-empty; relay-url stays as the single-candidate fallback for older setups.
+# Invalid and duplicate entries are dropped. When this holds more than one entry,
+# relay-strategy picks the candidate each request starts with and the rest serve
+# as the failover tail.
+# relay-urls:
+#   - https://relay-a.example.workers.dev
+#   - https://relay-b.example.workers.dev
+
+# How each request picks its starting relay: "none" (default) always uses the
+# first candidate, "round-robin" advances one slot per request, and "random"
+# picks a uniformly random slot. Failed candidates are skipped and retried on
+# the next one.
+# relay-strategy: none
+
+# Fail closed instead of falling back to direct egress: when no candidate
+# relay resolves, external HTTPS requests error out rather than leaving from
+# this machine's IP. Default false.
+# relay-strict: false
+
+# Pin a single relay per provider, keyed by provider name (lower-cased). A pin
+# short-circuits relay-urls for that provider only.
+# relay-provider-urls:
+#   claude: https://relay-a.example.workers.dev
+#   codex: https://relay-b.example.workers.dev
+
 # Qoder provider settings. Leave vpc-endpoint empty for the public global service.
 # Qoder CN Enterprise VPC accepts an instance name or its dedicated domain,
 # for example "acme" or "acme.vpc.qoder.com.cn". Do not include https:// or a path.

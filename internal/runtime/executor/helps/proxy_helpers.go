@@ -48,12 +48,16 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// The edge relay (when configured) is part of the client's identity, so it
 	// must be part of the cache key: a cached relay-wrapped or plain transport
-	// would otherwise leak across relay toggles.
-	relayURL := ""
+	// would otherwise leak across relay toggles or per-provider relay pins.
+	var relayOpts proxyutil.RelayOptions
+	relayIdentity := ""
 	if cfg != nil {
-		relayURL = strings.TrimSpace(cfg.RelayURL)
+		plan := cfg.RelayPlan()
+		providerKey := cliproxyauth.ProviderKey(auth)
+		relayOpts = plan.Options(providerKey)
+		relayIdentity = plan.Identity(providerKey)
 	}
-	cacheKey := proxyURL + "|" + relayURL
+	cacheKey := proxyURL + "|" + relayIdentity
 
 	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
 	if proxyURL != "" {
@@ -73,7 +77,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
-			httpClient = relayWrapClient(httpClient, relayURL)
+			httpClient = relayWrapClient(httpClient, relayOpts)
 			// Cache the client (fully wrapped, so every checkout shares the
 			// relay-wrapped transport for this cache key).
 			httpClientCacheMutex.Lock()
@@ -90,14 +94,15 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Transport = rt
 	}
 
-	return relayWrapClient(httpClient, relayURL)
+	return relayWrapClient(httpClient, relayOpts)
 }
 
-// relayWrapClient wraps the client's transport through the edge relay when
-// relayURL is non-empty. The already-relayed guard keeps cached clients and
-// double calls idempotent; an empty relayURL leaves the client untouched.
-func relayWrapClient(httpClient *http.Client, relayURL string) *http.Client {
-	if relayURL == "" {
+// relayWrapClient wraps the client's transport through the edge relay when the
+// plan resolved to at least one candidate (or strict mode must fail closed).
+// The already-relayed guard keeps cached clients and double calls idempotent; a
+// disabled relay leaves the client untouched.
+func relayWrapClient(httpClient *http.Client, opts proxyutil.RelayOptions) *http.Client {
+	if len(opts.URLs) == 0 && !opts.Strict {
 		return httpClient
 	}
 	if proxyutil.IsRelayRoundTripper(httpClient.Transport) {
@@ -107,7 +112,7 @@ func relayWrapClient(httpClient *http.Client, relayURL string) *http.Client {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	httpClient.Transport = proxyutil.WrapRelay(base, relayURL)
+	httpClient.Transport = proxyutil.WrapRelayWith(base, opts)
 	return httpClient
 }
 

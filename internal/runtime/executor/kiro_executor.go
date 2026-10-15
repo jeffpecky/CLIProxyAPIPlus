@@ -241,15 +241,15 @@ var (
 )
 
 // getKiroPooledHTTPClient returns a shared HTTP client with optimized connection pooling.
-// The client is lazily initialized per relay URL on first use and reused across requests.
+// The client is lazily initialized per relay identity on first use and reused across requests.
 // This is especially beneficial for:
 // - Reducing TCP handshake overhead
 // - Enabling HTTP/2 multiplexing
 // - Better handling of keep-alive connections
-func getKiroPooledHTTPClient(relayURL string) *http.Client {
+func getKiroPooledHTTPClient(relayIdentity string, relayOpts proxyutil.RelayOptions) *http.Client {
 	kiroHTTPClientPoolMu.Lock()
 	defer kiroHTTPClientPoolMu.Unlock()
-	if client, ok := kiroHTTPClientPool[relayURL]; ok {
+	if client, ok := kiroHTTPClientPool[relayIdentity]; ok {
 		return client
 	}
 
@@ -282,18 +282,18 @@ func getKiroPooledHTTPClient(relayURL string) *http.Client {
 	// Relay-wrap once at pool creation (never per checkout) so pooled clients
 	// for different relay settings stay isolated.
 	var pooledTransport http.RoundTripper = transport
-	if relayURL != "" {
-		pooledTransport = proxyutil.WrapRelay(transport, relayURL)
+	if len(relayOpts.URLs) > 0 || relayOpts.Strict {
+		pooledTransport = proxyutil.WrapRelayWith(transport, relayOpts)
 	}
 
 	client := &http.Client{
 		Transport: pooledTransport,
 		// No global timeout - let individual requests set their own timeouts via context
 	}
-	kiroHTTPClientPool[relayURL] = client
+	kiroHTTPClientPool[relayIdentity] = client
 
 	log.Debugf("kiro: initialized pooled HTTP client (relay=%q, MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
-		relayURL, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
+		relayIdentity, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
 
 	return client
 }
@@ -317,13 +317,18 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 		return newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	}
 
-	// No proxy - use pooled client for better performance. The relay URL is
-	// part of the pool key so relay toggles never share a pooled client.
-	var relayURL string
+	// No proxy - use pooled client for better performance. The relay identity is
+	// part of the pool key so relay toggles and per-provider pins never share a
+	// pooled client.
+	var relayIdentity string
+	var relayOpts proxyutil.RelayOptions
 	if cfg != nil {
-		relayURL = strings.TrimSpace(cfg.RelayURL)
+		plan := cfg.RelayPlan()
+		providerKey := cliproxyauth.ProviderKey(auth)
+		relayOpts = plan.Options(providerKey)
+		relayIdentity = plan.Identity(providerKey)
 	}
-	pooledClient := getKiroPooledHTTPClient(relayURL)
+	pooledClient := getKiroPooledHTTPClient(relayIdentity, relayOpts)
 
 	// If timeout is specified, we need to wrap the pooled transport with timeout
 	if timeout > 0 {

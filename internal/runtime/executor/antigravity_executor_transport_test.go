@@ -1045,7 +1045,7 @@ func TestAntigravityRelayClientWrapsOnceAndIsNilSafe(t *testing.T) {
 	cfg.RelayURL = "https://relay-ag-test.example.workers.dev"
 
 	base := &http.Client{}
-	wrapped := antigravityRelayClient(base, cfg)
+	wrapped := antigravityRelayClient(base, cfg, nil)
 	if wrapped.Transport == nil || !proxyutil.IsRelayRoundTripper(wrapped.Transport) {
 		t.Fatalf("first wrap transport %T is not relay-wrapped", wrapped.Transport)
 	}
@@ -1053,14 +1053,14 @@ func TestAntigravityRelayClientWrapsOnceAndIsNilSafe(t *testing.T) {
 
 	// A second call must not double-wrap: double-wrapping would clobber the
 	// x-relay-target header set by the outer wrapper (data corruption).
-	again := antigravityRelayClient(wrapped, cfg)
+	again := antigravityRelayClient(wrapped, cfg, nil)
 	if again.Transport != relayTransport {
 		t.Fatalf("second call re-wrapped: transport changed from %T to %T", relayTransport, again.Transport)
 	}
 
 	// Nil cfg is a no-op returning the base client untouched.
 	plain := &http.Client{}
-	if got := antigravityRelayClient(plain, nil); got != plain || plain.Transport != nil {
+	if got := antigravityRelayClient(plain, nil, nil); got != plain || plain.Transport != nil {
 		t.Fatalf("nil cfg must be a no-op, got client %p transport %T", got, plain.Transport)
 	}
 }

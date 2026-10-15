@@ -249,23 +249,38 @@ func (s *Service) syncRoundTripperProvider(cfg *config.Config) {
 	if s == nil || s.coreManager == nil || cfg == nil {
 		return
 	}
-	relayURL := strings.TrimSpace(cfg.RelayURL)
-	// A non-empty but malformed relay-url degrades to direct egress inside
+	plan := cfg.RelayPlan()
+	// A non-empty but malformed candidate degrades to direct egress inside
 	// WrapRelay (by design, pinned elsewhere) — say so instead of staying
-	// silent. Warn before the change-detection return below so a relay-url
+	// silent. Warn before the change-detection return below so a relay URL
 	// that was already invalid at Build time is still surfaced on reload.
-	if relayURL != "" {
-		if relay, errParse := url.Parse(relayURL); errParse != nil ||
-			(relay.Scheme != "http" && relay.Scheme != "https") || relay.Host == "" {
-			log.Warnf("invalid relay-url %q — egress stays direct", relayURL)
-		}
+	for _, candidate := range plan.URLs {
+		warnInvalidRelayURL("relay-url", candidate)
 	}
-	if s.roundTripperProvider != nil && s.roundTripperProvider.relayURL == relayURL {
+	for _, provider := range plan.Providers() {
+		warnInvalidRelayURL("relay pin for "+provider, plan.Pins[provider])
+	}
+	// The plan key covers candidates, strategy, strict, and pins: any of them
+	// changing means cached transports must be rebuilt.
+	if s.roundTripperProvider != nil && s.roundTripperProvider.plan.Key() == plan.Key() {
 		return
 	}
-	provider := newDefaultRoundTripperProvider(relayURL)
+	provider := newDefaultRoundTripperProvider(plan)
 	s.roundTripperProvider = provider
 	s.coreManager.SetRoundTripperProvider(provider)
+}
+
+// warnInvalidRelayURL reports a candidate that the transport will silently
+// ignore (degrading egress to direct) instead of letting it fail quietly at
+// request time.
+func warnInvalidRelayURL(label, relayURL string) {
+	if relayURL == "" {
+		return
+	}
+	if relay, errParse := url.Parse(relayURL); errParse != nil ||
+		(relay.Scheme != "http" && relay.Scheme != "https") || relay.Host == "" {
+		log.Warnf("invalid %s %q — egress stays direct", label, relayURL)
+	}
 }
 
 func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Config) bool {
