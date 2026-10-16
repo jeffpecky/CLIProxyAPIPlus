@@ -473,9 +473,9 @@ func expireBreak(t *testing.T, rt http.RoundTripper, host string) {
 	if !ok {
 		t.Fatalf("rt is %T, want *relayRoundTripper", rt)
 	}
-	for i, candidate := range relay.relays {
+	for i, candidate := range relay.state.relays {
 		if candidate.Host == host {
-			relay.breakers[i].untilNanos.Store(time.Now().Add(-time.Second).UnixNano())
+			relay.state.breakers[i].untilNanos.Store(time.Now().Add(-time.Second).UnixNano())
 			return
 		}
 	}
@@ -495,14 +495,17 @@ func attemptsEq(t *testing.T, got []string, want ...string) {
 	}
 }
 
-// newRelayTestPostRequest builds a body-carrying HTTPS request: its body
-// cannot be replayed, so it is never failed over mid-request.
+// newRelayTestPostRequest builds a body-carrying HTTPS request whose body is an
+// un-rewindable stream (no GetBody), so it is never replayed against another
+// relay. Requests with a rewindable body are built explicitly by the tests that
+// exercise failover.
 func newRelayTestPostRequest(t *testing.T) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, "https://api.example.com/v1/messages", strings.NewReader(`{"prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("building request: %v", err)
 	}
+	req.GetBody = nil
 	return req
 }
 

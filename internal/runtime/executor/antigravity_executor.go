@@ -491,7 +491,7 @@ func antigravityRelayClient(client *http.Client, cfg *config.Config, auth *clipr
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	client.Transport = proxyutil.WrapRelayWith(base, opts)
+	client.Transport = proxyutil.WrapRelayWithShared(base, opts)
 	return client
 }
 

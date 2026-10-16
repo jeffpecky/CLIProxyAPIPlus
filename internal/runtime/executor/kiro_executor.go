@@ -283,7 +283,7 @@ func getKiroPooledHTTPClient(relayIdentity string, relayOpts proxyutil.RelayOpti
 	// for different relay settings stay isolated.
 	var pooledTransport http.RoundTripper = transport
 	if len(relayOpts.URLs) > 0 || relayOpts.Strict {
-		pooledTransport = proxyutil.WrapRelayWith(transport, relayOpts)
+		pooledTransport = proxyutil.WrapRelayWithShared(transport, relayOpts)
 	}
 
 	client := &http.Client{

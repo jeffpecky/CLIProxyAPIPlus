@@ -31,7 +31,7 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 		if base == nil {
 			base = http.DefaultTransport
 		}
-		httpClient.Transport = proxyutil.WrapRelayWith(base, opts)
+		httpClient.Transport = proxyutil.WrapRelayWithShared(base, opts)
 	}
 	return httpClient
 }

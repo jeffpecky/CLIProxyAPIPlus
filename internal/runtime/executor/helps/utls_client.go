@@ -396,7 +396,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 	if cfg != nil {
 		if opts := cfg.RelayPlan().Options(cliproxyauth.ProviderKey(auth)); len(opts.URLs) > 0 || opts.Strict {
-			client.Transport = proxyutil.WrapRelayWith(client.Transport, opts)
+			client.Transport = proxyutil.WrapRelayWithShared(client.Transport, opts)
 		}
 	}
 	if timeout > 0 {

@@ -112,7 +112,7 @@ func relayWrapClient(httpClient *http.Client, opts proxyutil.RelayOptions) *http
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	httpClient.Transport = proxyutil.WrapRelayWith(base, opts)
+	httpClient.Transport = proxyutil.WrapRelayWithShared(base, opts)
 	return httpClient
 }
 

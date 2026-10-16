@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,8 +85,16 @@ type RelayOptions struct {
 	Strict bool
 }
 
-type relayRoundTripper struct {
-	base     http.RoundTripper
+// relayState is the rotation and breaker state for one relay configuration: the
+// parsed candidates, the rotation strategy, and the per-relay breakers. It is
+// deliberately kept out of relayRoundTripper so it can be shared process-wide by
+// every transport built for the same configuration (see WrapRelayWithShared).
+// Client factories build a client — and therefore a wrapper — per request when
+// no HTTP proxy is configured, so state living on the wrapper reset on every
+// call: the round-robin start slot never advanced past the first candidate and a
+// relay parked for a transport error was immediately un-parked. Sharing the
+// state is what makes rotation and breakers real.
+type relayState struct {
 	relays   []*url.URL
 	strategy string
 	strict   bool
@@ -93,6 +102,11 @@ type relayRoundTripper struct {
 	// breakers parks relays that failed at their own platform;
 	// index-aligned with relays.
 	breakers []relayBreaker
+}
+
+type relayRoundTripper struct {
+	base  http.RoundTripper
+	state *relayState
 }
 
 // WrapRelay rewrites external HTTPS requests through an edge relay worker
@@ -122,20 +136,66 @@ func WrapRelay(base http.RoundTripper, relayURL string) http.RoundTripper {
 // base untouched unless Strict is set, in which case the wrapper rejects
 // external HTTPS requests.
 func WrapRelayWith(base http.RoundTripper, opts RelayOptions) http.RoundTripper {
-	relays := parseRelayURLs(opts.URLs)
-	if len(relays) == 0 && !opts.Strict {
+	return wrapRelayWithState(base, newRelayState(opts))
+}
+
+// WrapRelayWithShared is WrapRelayWith for client factories that build a client
+// per request. Rotation and breaker state are shared process-wide by every
+// transport built for the same candidate list, strategy, and strict flag, so the
+// round-robin start slot keeps advancing and a relay parked for a transport
+// error stays parked for later requests — neither survives on a wrapper that is
+// rebuilt for every request. Use this at every production call site;
+// WrapRelayWith (isolated state) remains for tests and single-shot transports.
+func WrapRelayWithShared(base http.RoundTripper, opts RelayOptions) http.RoundTripper {
+	return wrapRelayWithState(base, sharedRelayState(opts))
+}
+
+func wrapRelayWithState(base http.RoundTripper, state *relayState) http.RoundTripper {
+	if state == nil {
 		return base
 	}
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &relayRoundTripper{
-		base:     base,
+	return &relayRoundTripper{base: base, state: state}
+}
+
+// newRelayState parses opts into rotation state. A nil result means relaying is
+// disabled (no valid candidate and not strict), which callers pass through to
+// the unwrapped base.
+func newRelayState(opts RelayOptions) *relayState {
+	relays := parseRelayURLs(opts.URLs)
+	if len(relays) == 0 && !opts.Strict {
+		return nil
+	}
+	return &relayState{
 		relays:   relays,
 		strategy: normalizeRelayStrategy(opts.Strategy),
 		strict:   opts.Strict,
 		breakers: make([]relayBreaker, len(relays)),
 	}
+}
+
+// relayStatePool holds one *relayState per relay identity. Configured relays
+// change rarely, so the pool stays small; a config reload that changes the
+// candidate list, strategy, or strict flag resolves to a new identity and a new
+// state, while the previous identity is simply no longer referenced.
+var relayStatePool sync.Map // string -> *relayState
+
+func sharedRelayState(opts RelayOptions) *relayState {
+	fresh := newRelayState(opts)
+	if fresh == nil {
+		return nil
+	}
+	key := RelayIdentity(opts.URLs, opts.Strategy, opts.Strict)
+	if key == "" {
+		key = "strict|none"
+	}
+	if existing, ok := relayStatePool.Load(key); ok {
+		return existing.(*relayState)
+	}
+	actual, _ := relayStatePool.LoadOrStore(key, fresh)
+	return actual.(*relayState)
 }
 
 // RelayIdentity returns the canonical cache-key fragment describing relay
@@ -169,40 +229,49 @@ func (r *relayRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if !r.shouldRelay(req.URL) {
 		return r.base.RoundTrip(req)
 	}
-	if len(r.relays) == 0 {
-		if r.strict {
+	if len(r.state.relays) == 0 {
+		if r.state.strict {
 			return nil, ErrRelayStrict
 		}
 		return r.base.RoundTrip(req)
 	}
-	candidates := r.order()
+	now := time.Now()
+	candidates := r.order(now)
 	var lastErr error
 	for i, idx := range candidates {
-		resp, err := r.base.RoundTrip(r.rewrite(req, r.relays[idx]))
+		attempt, buildErr := r.attemptRequest(req, idx, i)
+		if buildErr != nil {
+			// The body could not be rewound for a retry: surface the original
+			// failure rather than a secondary one.
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, buildErr
+		}
+		resp, err := r.base.RoundTrip(attempt)
 		if err != nil {
 			lastErr = err
 			// A caller that hung up is not the relay's fault: never park a
 			// relay on behalf of a cancelled or expired request context.
 			cancelled := req.Context().Err() != nil
-			if !cancelled && r.breakers[idx].park(time.Now(), relayBreakTTL) {
+			if !cancelled && r.state.breakers[idx].park(now, relayBreakTTL) {
 				log.Warnf("relay %s parked for %s after a transport error: %v",
-					r.relays[idx].Host, relayBreakTTL, err)
+					r.state.relays[idx].Host, relayBreakTTL, err)
 			}
-			if i == len(candidates)-1 || !retryableRequest(req) || cancelled {
+			if i == len(candidates)-1 || cancelled || !retryableRequest(req, err) {
 				break
 			}
 			continue
 		}
 		if relayHostFailure(resp) {
 			// The relay's own platform throttled or failed it, so park it for
-			// later requests. This request fails over only if it can: a
-			// bodyless request replays cleanly against the next candidate, a
-			// body already handed to the base transport cannot.
-			if r.breakers[idx].park(time.Now(), relayBreakTTL) {
+			// later requests. The upstream never saw this request, so a
+			// replayable body (GetBody) can fail over cleanly too.
+			if r.state.breakers[idx].park(now, relayBreakTTL) {
 				log.Warnf("relay %s parked for %s after a platform failure: HTTP %d",
-					r.relays[idx].Host, relayBreakTTL, resp.StatusCode)
+					r.state.relays[idx].Host, relayBreakTTL, resp.StatusCode)
 			}
-			if i < len(candidates)-1 && retryableRequest(req) {
+			if i < len(candidates)-1 && retryableRequest(req, nil) {
 				drainClose(resp)
 				continue
 			}
@@ -210,8 +279,8 @@ func (r *relayRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		// The relay answered — even if the answer is an upstream rate limit,
 		// the relay itself is healthy, so it keeps its slot.
-		if r.breakers[idx].release() {
-			log.Infof("relay %s healthy again; breaker cleared", r.relays[idx].Host)
+		if r.state.breakers[idx].release() {
+			log.Infof("relay %s healthy again; breaker cleared", r.state.relays[idx].Host)
 		}
 		return finishRelayResponse(resp), nil
 	}
@@ -219,6 +288,23 @@ func (r *relayRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	// loop above always ends with either a returned response or a recorded
 	// error; lastErr is non-nil whenever control reaches this line.
 	return nil, lastErr
+}
+
+// attemptRequest builds the request aimed at candidate relay idx. For a retry
+// (attempt > 0) it rewinds the body from req.GetBody, so an inference POST whose
+// body the caller made replayable can fail over without resending a body the
+// previous attempt already consumed.
+func (r *relayRoundTripper) attemptRequest(req *http.Request, idx, attempt int) (*http.Request, error) {
+	clone := r.rewrite(req, r.state.relays[idx])
+	if attempt == 0 || req.GetBody == nil || req.Body == nil || req.Body == http.NoBody {
+		return clone, nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	clone.Body = body
+	return clone, nil
 }
 
 // relayHostFailure reports whether a 429/5xx came from the relay's own
@@ -287,20 +373,19 @@ func (r *relayRoundTripper) rewrite(req *http.Request, relay *url.URL) *http.Req
 // parked the full rotated list comes back anyway, so a dark pool can never
 // become an outage. The counter is shared by every request on the transport
 // so round-robin spreads load rather than pinning a start slot.
-func (r *relayRoundTripper) order() []int {
-	n := len(r.relays)
+func (r *relayRoundTripper) order(now time.Time) []int {
+	n := len(r.state.relays)
 	var start int
-	switch r.strategy {
+	switch r.state.strategy {
 	case RelayStrategyRoundRobin:
-		start = int((r.counter.Add(1) - 1) % uint64(n))
+		start = int((r.state.counter.Add(1) - 1) % uint64(n))
 	case RelayStrategyRandom:
 		start = rand.Intn(n)
 	}
-	now := time.Now()
 	indices := make([]int, 0, n)
 	for offset := 0; offset < n; offset++ {
 		idx := (start + offset) % n
-		if !r.breakers[idx].parked(now) {
+		if !r.state.breakers[idx].parked(now) {
 			indices = append(indices, idx)
 		}
 	}
@@ -315,10 +400,38 @@ func (r *relayRoundTripper) order() []int {
 }
 
 // retryableRequest reports whether the request can be replayed against a
-// different relay after a transport error. A body already handed to the base
-// transport cannot be rewound, so only bodyless requests are retried.
-func retryableRequest(req *http.Request) bool {
-	return req.Body == nil || req.Body == http.NoBody
+// different relay after a failure. A bodyless request always can. A bodyed
+// request can when the caller supplied GetBody — a rewindable body — and the
+// failure happened before the request reached the upstream: a DNS or connect
+// error, which cannot have been acted on. err is nil when the relay's own
+// platform produced the response, since the upstream never saw that request
+// either.
+func retryableRequest(req *http.Request, err error) bool {
+	if req.Context().Err() != nil {
+		return false
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return true
+	}
+	if req.GetBody == nil {
+		return false
+	}
+	return err == nil || preWriteError(err)
+}
+
+// preWriteError reports whether err happened before any request bytes were sent
+// upstream, so replaying the request cannot duplicate it: DNS resolution and TCP
+// connect failures qualify, a reset mid-exchange does not.
+func preWriteError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Op == "dial" || opErr.Op == "connect"
+	}
+	return false
 }
 
 // IsRelayRoundTripper reports whether rt was produced by WrapRelay/WrapRelayWith.
@@ -334,7 +447,7 @@ func (r *relayRoundTripper) shouldRelay(target *url.URL) bool {
 	if target.Scheme != "https" || target.Host == "" {
 		return false
 	}
-	for _, relay := range r.relays {
+	for _, relay := range r.state.relays {
 		if strings.EqualFold(target.Host, relay.Host) {
 			return false
 		}

@@ -59,7 +59,7 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	}
 	var transport http.RoundTripper = built
 	if len(relayOpts.URLs) > 0 || relayOpts.Strict {
-		transport = proxyutil.WrapRelayWith(built, relayOpts)
+		transport = proxyutil.WrapRelayWithShared(built, relayOpts)
 	}
 	p.mu.Lock()
 	p.cache[cacheKey] = transport
