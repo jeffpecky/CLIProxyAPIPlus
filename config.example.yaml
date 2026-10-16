@@ -202,7 +202,12 @@ relay-url: ""
 # How each request picks its starting relay: "none" (default) always uses the
 # first candidate, "round-robin" advances one slot per request, and "random"
 # picks a uniformly random slot. Failed candidates are skipped and retried on
-# the next one.
+# the next one. A candidate that fails at the transport level, or answers with
+# a 429/5xx its own hosting platform produced (a platform error page rather
+# than a response the worker forwarded), is parked for 30s and skipped by
+# later requests; a 429/5xx the upstream provider actually returned is the
+# provider's, not the relay's, and parks nothing. When every candidate is
+# parked they are all tried anyway, so parking can never empty the pool.
 # relay-strategy: none
 
 # Fail closed instead of falling back to direct egress: when no candidate

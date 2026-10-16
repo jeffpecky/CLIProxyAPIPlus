@@ -2,12 +2,16 @@ package proxyutil
 
 import (
 	"errors"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Relay strategies accepted by RelayOptions.Strategy. Any other value,
@@ -23,6 +27,46 @@ const (
 // closed: an unrelayed request would egress from the local IP, which is
 // exactly what the operator configured the relay to prevent.
 var ErrRelayStrict = errors.New("relay strict mode is enabled but no relay URL is configured")
+
+// relayBreakTTL is how long a relay that failed at its own platform (or was
+// unreachable at the transport level) is skipped before requests try it
+// again. Long enough to ride out a Vercel/Cloudflare throttle burst, short
+// enough that a recovered relay rejoins the pool without operator action.
+const relayBreakTTL = 30 * time.Second
+
+// relayProxyHeader stamps every response an edge relay worker actually
+// proxied, letting the breaker tell an answer the upstream provider really
+// gave (the relay is healthy — only its target said no) from a 429/5xx the
+// worker's own hosting platform produced (the relay itself is unhealthy).
+// See relayHostFailure.
+const relayProxyHeader = "x-relay-proxied"
+
+// relayBreaker parks one relay for a window of time. The zero value is an
+// open (healthy) breaker; all operations are safe for concurrent use.
+type relayBreaker struct {
+	untilNanos atomic.Int64
+}
+
+func (b *relayBreaker) parked(now time.Time) bool {
+	return b.untilNanos.Load() > now.UnixNano()
+}
+
+// park closes the breaker for window and reports whether it opened the window
+// just now — a transition, so callers can log the park once instead of on
+// every request that lands on an already-dark relay.
+func (b *relayBreaker) park(now time.Time, window time.Duration) bool {
+	alreadyParked := b.parked(now)
+	b.untilNanos.Store(now.Add(window).UnixNano())
+	return !alreadyParked
+}
+
+// release opens the breaker and reports whether a window had been set, so a
+// recovery is logged once rather than on every healthy response.
+func (b *relayBreaker) release() bool {
+	wasSet := b.untilNanos.Load() != 0
+	b.untilNanos.Store(0)
+	return wasSet
+}
 
 // RelayOptions describes the relays a transport may use and how a request
 // picks among them.
@@ -46,6 +90,9 @@ type relayRoundTripper struct {
 	strategy string
 	strict   bool
 	counter  atomic.Uint64
+	// breakers parks relays that failed at their own platform;
+	// index-aligned with relays.
+	breakers []relayBreaker
 }
 
 // WrapRelay rewrites external HTTPS requests through an edge relay worker
@@ -64,11 +111,16 @@ func WrapRelay(base http.RoundTripper, relayURL string) http.RoundTripper {
 
 // WrapRelayWith is WrapRelay for a candidate list. Each request is aimed at
 // the candidate selected by Strategy; when that candidate fails at the
-// transport level the remaining candidates are tried in order, but only for
-// bodyless requests — a request body already handed to the base transport
-// cannot be rewound, so replaying it would duplicate a streaming POST
-// upstream. An empty candidate list returns base untouched unless Strict is
-// set, in which case the wrapper rejects external HTTPS requests.
+// transport level — or answers with a failure its own platform produced (see
+// relayHostFailure) — it is parked for relayBreakTTL and the remaining
+// candidates are tried in order, but only for bodyless requests: a request
+// body already handed to the base transport cannot be rewound, so replaying
+// it would duplicate a streaming POST upstream. Later requests skip parked
+// candidates until the window elapses; if every candidate is parked the full
+// list is used anyway, because parking must never become an outage (or leak
+// a strict-mode request onto the local IP). An empty candidate list returns
+// base untouched unless Strict is set, in which case the wrapper rejects
+// external HTTPS requests.
 func WrapRelayWith(base http.RoundTripper, opts RelayOptions) http.RoundTripper {
 	relays := parseRelayURLs(opts.URLs)
 	if len(relays) == 0 && !opts.Strict {
@@ -82,6 +134,7 @@ func WrapRelayWith(base http.RoundTripper, opts RelayOptions) http.RoundTripper 
 		relays:   relays,
 		strategy: normalizeRelayStrategy(opts.Strategy),
 		strict:   opts.Strict,
+		breakers: make([]relayBreaker, len(relays)),
 	}
 }
 
@@ -124,17 +177,92 @@ func (r *relayRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	candidates := r.order()
 	var lastErr error
-	for i, relay := range candidates {
-		resp, err := r.base.RoundTrip(r.rewrite(req, relay))
-		if err == nil {
-			return resp, nil
+	for i, idx := range candidates {
+		resp, err := r.base.RoundTrip(r.rewrite(req, r.relays[idx]))
+		if err != nil {
+			lastErr = err
+			// A caller that hung up is not the relay's fault: never park a
+			// relay on behalf of a cancelled or expired request context.
+			cancelled := req.Context().Err() != nil
+			if !cancelled && r.breakers[idx].park(time.Now(), relayBreakTTL) {
+				log.Warnf("relay %s parked for %s after a transport error: %v",
+					r.relays[idx].Host, relayBreakTTL, err)
+			}
+			if i == len(candidates)-1 || !retryableRequest(req) || cancelled {
+				break
+			}
+			continue
 		}
-		lastErr = err
-		if i == len(candidates)-1 || !retryableRequest(req) {
-			break
+		if relayHostFailure(resp) {
+			// The relay's own platform throttled or failed it, so park it for
+			// later requests. This request fails over only if it can: a
+			// bodyless request replays cleanly against the next candidate, a
+			// body already handed to the base transport cannot.
+			if r.breakers[idx].park(time.Now(), relayBreakTTL) {
+				log.Warnf("relay %s parked for %s after a platform failure: HTTP %d",
+					r.relays[idx].Host, relayBreakTTL, resp.StatusCode)
+			}
+			if i < len(candidates)-1 && retryableRequest(req) {
+				drainClose(resp)
+				continue
+			}
+			return finishRelayResponse(resp), nil
 		}
+		// The relay answered — even if the answer is an upstream rate limit,
+		// the relay itself is healthy, so it keeps its slot.
+		if r.breakers[idx].release() {
+			log.Infof("relay %s healthy again; breaker cleared", r.relays[idx].Host)
+		}
+		return finishRelayResponse(resp), nil
 	}
+	// order() never returns an empty list while relays are configured, so the
+	// loop above always ends with either a returned response or a recorded
+	// error; lastErr is non-nil whenever control reaches this line.
 	return nil, lastErr
+}
+
+// relayHostFailure reports whether a 429/5xx came from the relay's own
+// hosting platform rather than being forwarded from the upstream provider.
+//
+// A response stamped with x-relay-proxied was proxied by the worker: the
+// provider answered, and no amount of relaying egress changes an account
+// quota, so the relay stays in the pool. An unstamped failure shaped like an
+// API payload (JSON/SSE) is a pre-stamp relay forwarding that same provider
+// answer — also left alone. An unstamped failure with any other content type
+// is a platform error page (Vercel concurrency 429, Cloudflare error 1015,
+// a gateway HTML page): the relay is unhealthy and gets parked, which is
+// exactly the case a bodyed POST cannot fail over out of on its own.
+func relayHostFailure(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < http.StatusInternalServerError {
+		return false
+	}
+	if resp.Header.Get(relayProxyHeader) != "" {
+		return false
+	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	return !strings.Contains(contentType, "json") && !strings.Contains(contentType, "event-stream")
+}
+
+// finishRelayResponse strips the worker's breaker stamp so the caller sees a
+// response indistinguishable from a direct upstream reply.
+func finishRelayResponse(resp *http.Response) *http.Response {
+	if resp != nil && resp.Header != nil {
+		resp.Header.Del(relayProxyHeader)
+	}
+	return resp
+}
+
+// drainClose discards a failure response being replaced by the next
+// candidate, releasing its connection instead of leaking the body.
+func drainClose(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
 }
 
 // rewrite re-points an outbound request at the given relay worker, carrying
@@ -154,28 +282,36 @@ func (r *relayRoundTripper) rewrite(req *http.Request, relay *url.URL) *http.Req
 	return clone
 }
 
-// order returns the candidates for this request, rotated per Strategy. The
-// counter is shared by every request on the transport so round-robin spreads
-// load rather than pinning a start slot.
-func (r *relayRoundTripper) order() []*url.URL {
+// order returns the indices of the candidates for this request, rotated per
+// Strategy. Relays the breaker has parked are skipped; if every relay is
+// parked the full rotated list comes back anyway, so a dark pool can never
+// become an outage. The counter is shared by every request on the transport
+// so round-robin spreads load rather than pinning a start slot.
+func (r *relayRoundTripper) order() []int {
 	n := len(r.relays)
+	var start int
 	switch r.strategy {
 	case RelayStrategyRoundRobin:
-		return rotate(r.relays, int((r.counter.Add(1)-1)%uint64(n)))
+		start = int((r.counter.Add(1) - 1) % uint64(n))
 	case RelayStrategyRandom:
-		return rotate(r.relays, rand.Intn(n))
-	default:
-		return r.relays
+		start = rand.Intn(n)
 	}
-}
-
-func rotate(relays []*url.URL, start int) []*url.URL {
-	if start <= 0 {
-		return relays
+	now := time.Now()
+	indices := make([]int, 0, n)
+	for offset := 0; offset < n; offset++ {
+		idx := (start + offset) % n
+		if !r.breakers[idx].parked(now) {
+			indices = append(indices, idx)
+		}
 	}
-	rotated := make([]*url.URL, 0, len(relays))
-	rotated = append(rotated, relays[start:]...)
-	return append(rotated, relays[:start]...)
+	if len(indices) > 0 {
+		return indices
+	}
+	// Everything is parked: ignore the breakers rather than send nothing.
+	for offset := 0; offset < n; offset++ {
+		indices = append(indices, (start+offset)%n)
+	}
+	return indices
 }
 
 // retryableRequest reports whether the request can be replayed against a
