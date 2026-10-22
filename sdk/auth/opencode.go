@@ -37,8 +37,8 @@ func (a *OpenCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		UpdatedAt: now,
 		Attributes: map[string]string{
 			"header:Authorization":      "Bearer public",
-			"header:User-Agent":         "opencode",
-			"header:x-opencode-client":  "desktop",
+			"header:User-Agent":         "opencode/latest/2.0.26/cli",
+			"header:x-opencode-client":  "cli",
 			"header:x-opencode-project": "global",
 		},
 		Metadata: map[string]any{

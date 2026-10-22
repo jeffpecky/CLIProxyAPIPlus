@@ -27,38 +27,25 @@ import (
 )
 
 const (
-	openCodeBaseURL          = "https://opencode.ai/zen/v1"
-	openCodeResponsesURL     = "https://opencode.ai/zen/v1/responses"
+	// OpenCode free tier moved from /zen/v1 to /inference/v1 (OpenCode v2);
+	// /zen/v1 now answers every free request with 403 FreeTierError.
+	openCodeBaseURL          = "https://opencode.ai/inference/v1"
+	openCodeResponsesURL     = "https://opencode.ai/inference/v1/responses"
 	openCodeSessionHeader    = "x-opencode-session"
 	openCodeMaxSessionLength = 256
-	openCodeUA               = "opencode/1.18.31"
+	// openCodeFreeUA is the OpenCode v2 client fingerprint; upstream rejects the
+	// v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
+	openCodeFreeUA = "opencode/latest/2.0.26/cli"
+	// openCodeFreeClient is the v2 x-opencode-client value (v1 used "desktop").
+	openCodeFreeClient = "cli"
+	// openCodeUA is the legacy v1 UA still used by the OpenCode Go lane.
+	openCodeUA = "opencode/1.18.31"
 )
 
 // openCodeMuseSparkRe matches muse-spark model IDs.
 var openCodeMuseSparkRe = regexp.MustCompile(`(?i)^(?:.+/)?muse[-_]?spark(?:$|[-_:.\s])`)
 
 var base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-// openCodeDecoyTools are injected to satisfy upstream free-tier verification
-// which requires both 'bash' and 'read' in the tools payload.
-var openCodeDecoyTools = []map[string]any{
-	{
-		"type": "function",
-		"function": map[string]any{
-			"name":        "bash",
-			"description": "This tool is currently unavailable and must not be used.",
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
-		},
-	},
-	{
-		"type": "function",
-		"function": map[string]any{
-			"name":        "read",
-			"description": "This tool is currently unavailable and must not be used.",
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
-		},
-	},
-}
 
 func openCodeBase62Random(n int) string {
 	b := make([]byte, n)
@@ -112,6 +99,24 @@ func openCodeGenerateRequestId() string {
 	return "msg_" + hex12 + openCodeBase62Random(14)
 }
 
+// Session prefix = 12 hex of ~(timeMs * 0x1000 + counter), low 48 bits, like the
+// CLI. Upstream decodes it and rejects a non-small counter with 403 FreeTierError.
+const (
+	openCodeSessionPrefixMask = (1 << 48) - 1
+	openCodeSessionTimeMask   = (1 << 36) - 1
+)
+
+// openCodeDescendingTimeHex encodes ~(timeValue*0x1000 + counter) into 12 hex.
+func openCodeDescendingTimeHex(timeValue uint64, counter uint64) string {
+	inverted := ^(timeValue*0x1000 + counter)
+	hexPart := ""
+	for i := 5; i >= 0; i-- {
+		hexPart += string("0123456789abcdef"[(inverted>>(uint(i)*8))&0xff>>4])
+		hexPart += string("0123456789abcdef"[(inverted>>(uint(i)*8))&0xff&0x0f])
+	}
+	return hexPart
+}
+
 // openCodeTranslateSession creates a deterministic session ID from a downstream
 // session ID and client tool name, in canonical format: ses_ + 12 hex + 14 base62.
 func openCodeTranslateSession(sessionID, clientTool string) string {
@@ -123,12 +128,14 @@ func openCodeTranslateSession(sessionID, clientTool string) string {
 	}
 	input := "opencode\x00" + clientTool + "\x00" + sessionID
 	sum := sha256.Sum256([]byte(input))
-	// 12 hex chars from first 6 bytes of SHA-256
-	hexPart := ""
-	for i := 0; i < 6; i++ {
-		hexPart += string("0123456789abcdef"[sum[i]>>4])
-		hexPart += string("0123456789abcdef"[sum[i]&0x0f])
+	// Deterministic time field from the digest, counter pinned to 1 (what the CLI
+	// sends); a non-canonical prefix is rejected upstream with 403 FreeTierError.
+	timeValue := uint64(0)
+	for i := 0; i < 5; i++ {
+		timeValue = (timeValue << 8) | uint64(sum[i])
 	}
+	timeValue &= openCodeSessionTimeMask
+	hexPart := openCodeDescendingTimeHex(timeValue, 1)
 	// 14 base62 chars from bytes 6-19
 	base62Part := ""
 	for i := 6; i < 20 && i < len(sum); i++ {
@@ -502,68 +509,6 @@ func openCodeCloakResponsesTools(payload []byte) []byte {
 	return out
 }
 
-// openCodeCloakDecoyTools injects decoy bash/read tools if not already present.
-func openCodeCloakDecoyTools(payload []byte) []byte {
-	if payload == nil {
-		return payload
-	}
-	var body map[string]any
-	if json.Unmarshal(payload, &body) != nil {
-		return payload
-	}
-	existing := map[string]bool{}
-	if tools, ok := body["tools"].([]any); ok {
-		for _, t := range tools {
-			tm, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-			name := ""
-			if fn, ok := tm["function"].(map[string]any); ok {
-				name, _ = fn["name"].(string)
-			}
-			if name == "" {
-				name, _ = tm["name"].(string)
-			}
-			if name != "" {
-				existing[name] = true
-			}
-		}
-	}
-	needsTools := len(existing) == 0
-	if !needsTools {
-		needsTools = !existing["bash"] || !existing["read"]
-	}
-	if needsTools {
-		if _, ok := body["tools"].([]any); !ok {
-			body["tools"] = []any{}
-		}
-		tools := body["tools"].([]any)
-		for _, decoy := range openCodeDecoyTools {
-			dcopy := map[string]any{
-				"type": decoy["type"],
-				"function": map[string]any{
-					"name":        decoy["function"].(map[string]any)["name"],
-					"description": decoy["function"].(map[string]any)["description"],
-					"parameters":  decoy["function"].(map[string]any)["parameters"],
-				},
-			}
-			name := dcopy["function"].(map[string]any)["name"].(string)
-			if !existing[name] {
-				tools = append(tools, dcopy)
-			}
-		}
-		body["tools"] = tools
-		if len(existing) == 0 {
-			if _, hasTC := body["tool_choice"]; !hasTC {
-				body["tool_choice"] = "none"
-			}
-		}
-	}
-	out, _ := json.Marshal(body)
-	return out
-}
-
 // openCodeForceStream ensures body.stream is true for free-tier SSE aggregation.
 func openCodeForceStream(payload []byte) []byte {
 	if payload == nil {
@@ -583,12 +528,17 @@ func openCodeForceStream(payload []byte) []byte {
 type OpenCodeExecutor struct {
 	*OpenAICompatExecutor
 	cfg *config.Config
+	// freeTier enables the OpenCode v2 free-tier fingerprint (Bearer public,
+	// /inference/v1 headers and the read/shell tools). The OpenCode Go lane
+	// embeds this executor but keeps its own keyed identity.
+	freeTier bool
 }
 
 func NewOpenCodeExecutor(cfg *config.Config) *OpenCodeExecutor {
 	return &OpenCodeExecutor{
 		OpenAICompatExecutor: NewOpenAICompatExecutor("opencode", cfg),
 		cfg:                  cfg,
+		freeTier:             true,
 	}
 }
 
@@ -610,28 +560,40 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 
-	// User-Agent: canonical version string for free-tier fingerprint validation
-	req.Header.Set("User-Agent", openCodeUA)
+	// User-Agent: OpenCode v2 client fingerprint for free-tier validation
+	req.Header.Set("User-Agent", openCodeFreeUA)
 
 	// Resolve session
-	resolvedSession := openCodeResolveSession(req.Header, nil, auth, "desktop")
+	resolvedSession := openCodeResolveSession(req.Header, nil, auth, openCodeFreeClient)
 	if req.Header.Get(openCodeSessionHeader) == "" {
 		req.Header.Set(openCodeSessionHeader, resolvedSession)
 	}
 
-	// Request ID: derive from session
-	if req.Header.Get("x-opencode-request") == "" {
-		req.Header.Set("x-opencode-request", openCodeDeriveRequestId(resolvedSession, nil))
-	}
+	// v2 identity: x-opencode-request is v1-only and now answered with 403.
+	req.Header.Del("x-opencode-request")
+	openCodeSetSessionHeaders(req.Header, resolvedSession)
 
 	if req.Header.Get("x-opencode-project") == "" {
 		req.Header.Set("x-opencode-project", "global")
 	}
 	if req.Header.Get("x-opencode-client") == "" {
-		req.Header.Set("x-opencode-client", "desktop")
+		req.Header.Set("x-opencode-client", openCodeFreeClient)
 	}
 
 	return nil
+}
+
+// openCodeSetSessionHeaders mirrors the OpenCode v2 CLI, which sends the session
+// id under several aliases next to x-opencode-session.
+func openCodeSetSessionHeaders(headers http.Header, session string) {
+	if headers == nil || session == "" {
+		return
+	}
+	for _, name := range []string{"x-opencode-session-id", "x-session-affinity", "x-session-id"} {
+		if headers.Get(name) == "" {
+			headers.Set(name, session)
+		}
+	}
 }
 
 func (e *OpenCodeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
@@ -664,24 +626,30 @@ func injectOpenCodeHeaders(auth *cliproxyauth.Auth, headers http.Header, payload
 
 	// Free tier: always use "Bearer public"
 	auth.Attributes["header:Authorization"] = "Bearer public"
-	auth.Attributes["header:User-Agent"] = openCodeUA
+	auth.Attributes["header:User-Agent"] = openCodeFreeUA
 
 	// Resolve session
-	if auth.Attributes["header:"+openCodeSessionHeader] == "" {
-		resolvedSession := openCodeResolveSession(headers, payload, auth, clientTool)
-		auth.Attributes["header:"+openCodeSessionHeader] = resolvedSession
+	sessionID := auth.Attributes["header:"+openCodeSessionHeader]
+	if sessionID == "" {
+		sessionID = openCodeResolveSession(headers, payload, auth, clientTool)
+		auth.Attributes["header:"+openCodeSessionHeader] = sessionID
 	}
 
-	// Request ID
-	if auth.Attributes["header:x-opencode-request"] == "" {
-		sessionID := auth.Attributes["header:"+openCodeSessionHeader]
-		auth.Attributes["header:x-opencode-request"] = openCodeDeriveRequestId(sessionID, payload)
+	// v2 identity: x-opencode-request is v1-only and now answered with 403.
+	delete(auth.Attributes, "header:x-opencode-request")
+	for _, name := range []string{"x-opencode-session-id", "x-session-affinity", "x-session-id"} {
+		if auth.Attributes["header:"+name] == "" {
+			auth.Attributes["header:"+name] = sessionID
+		}
 	}
 
 	if auth.Attributes["header:x-opencode-project"] == "" {
 		auth.Attributes["header:x-opencode-project"] = "global"
 	}
 	if auth.Attributes["header:x-opencode-client"] == "" {
+		if clientTool == "" || clientTool == "generic" {
+			clientTool = openCodeFreeClient
+		}
 		auth.Attributes["header:x-opencode-client"] = clientTool
 	}
 }
@@ -720,10 +688,15 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return e.executeResponses(ctx, auth, req, opts, responseFormat)
 	}
 
-	// Force stream + decoy tools for free tier (chat/completions path)
+	// Force stream + free-tier fingerprint tools (chat/completions path)
 	req.Payload = openCodeForceStream(req.Payload)
-	req.Payload = openCodeCloakDecoyTools(req.Payload)
-	return e.OpenAICompatExecutor.Execute(ctx, auth, req, opts)
+	toolNames := openCodeApplyFingerprintIfFree(e.freeTier, &req.Payload, false)
+	resp, err := e.OpenAICompatExecutor.Execute(ctx, auth, req, opts)
+	if err != nil {
+		return resp, err
+	}
+	resp.Payload = helps.RestoreOpenCodeToolNames(resp.Payload, toolNames)
+	return resp, nil
 }
 
 // ExecuteStream performs a streaming chat completion request to OpenCode.
@@ -739,19 +712,65 @@ func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		return e.executeResponsesStream(ctx, auth, req, opts, responseFormat)
 	}
 
-	// Force stream + decoy tools for free tier (chat/completions path)
+	// Force stream + free-tier fingerprint tools (chat/completions path)
 	req.Payload = openCodeForceStream(req.Payload)
-	req.Payload = openCodeCloakDecoyTools(req.Payload)
-	return e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
+	toolNames := openCodeApplyFingerprintIfFree(e.freeTier, &req.Payload, false)
+	res, err := e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		return res, err
+	}
+	if res != nil {
+		res.Chunks = openCodeRestoreStreamChunks(ctx, res.Chunks, toolNames)
+	}
+	return res, nil
 }
 
-// executeResponses makes a direct HTTP call to /zen/v1/responses for muse-spark models.
+// openCodeApplyFingerprintIfFree applies the OpenCode v2 free-tier fingerprint
+// in place and returns the alias -> original rename map (nil for other lanes).
+func openCodeApplyFingerprintIfFree(freeTier bool, payload *[]byte, flat bool) map[string]string {
+	if !freeTier || payload == nil {
+		return nil
+	}
+	updated, names := helps.ApplyOpenCodeFingerprintTools(*payload, flat)
+	*payload = updated
+	return names
+}
+
+// openCodeRestoreStreamChunks maps concealed alias tool names back to the
+// caller's originals on each streamed chunk.
+func openCodeRestoreStreamChunks(ctx context.Context, in <-chan cliproxyexecutor.StreamChunk, names map[string]string) <-chan cliproxyexecutor.StreamChunk {
+	if len(names) == 0 || in == nil {
+		return in
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		for chunk := range in {
+			if len(chunk.Payload) > 0 {
+				chunk.Payload = helps.RestoreOpenCodeToolNames(chunk.Payload, names)
+			}
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+// executeResponses makes a direct HTTP call to /inference/v1/responses for muse-spark models.
 func (e *OpenCodeExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, responseFormat sdktranslator.Format) (cliproxyexecutor.Response, error) {
 	body := openCodeChatToResponses(req.Payload)
 	if body == nil {
 		body = req.Payload
 	}
-	body = openCodeCloakResponsesTools(body)
+	var toolNames map[string]string
+	if e.freeTier {
+		body, toolNames = helps.ApplyOpenCodeFingerprintTools(body, true)
+	} else {
+		body = openCodeCloakResponsesTools(body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openCodeResponsesURL, bytes.NewReader(body))
 	if err != nil {
@@ -796,20 +815,26 @@ func (e *OpenCodeExecutor) executeResponses(ctx context.Context, auth *cliproxya
 			if responseFormat != to && responseFormat.String() != "" {
 				out = sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, req.Payload, out, &param)
 			}
+			out = helps.RestoreOpenCodeToolNames(out, toolNames)
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
 	return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: "upstream responses stream completed without result"}
 }
 
-// executeResponsesStream makes a streaming HTTP call to /zen/v1/responses for muse-spark models
+// executeResponsesStream makes a streaming HTTP call to /inference/v1/responses for muse-spark models
 // and translates Responses API events into the client's expected stream format.
 func (e *OpenCodeExecutor) executeResponsesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, responseFormat sdktranslator.Format) (*cliproxyexecutor.StreamResult, error) {
 	body := openCodeChatToResponses(req.Payload)
 	if body == nil {
 		body = req.Payload
 	}
-	body = openCodeCloakResponsesTools(body)
+	var toolNames map[string]string
+	if e.freeTier {
+		body, toolNames = helps.ApplyOpenCodeFingerprintTools(body, true)
+	} else {
+		body = openCodeCloakResponsesTools(body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openCodeResponsesURL, bytes.NewReader(body))
 	if err != nil {
@@ -926,7 +951,7 @@ func (e *OpenCodeExecutor) executeResponsesStream(ctx context.Context, auth *cli
 	}()
 
 	return &cliproxyexecutor.StreamResult{
-		Chunks:  out,
+		Chunks:  openCodeRestoreStreamChunks(ctx, out, toolNames),
 		Headers: httpResp.Header.Clone(),
 	}, nil
 }

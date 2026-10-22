@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -200,49 +201,108 @@ func TestOpenCodeForceStream(t *testing.T) {
 	}
 }
 
-func TestOpenCodeCloakDecoyTools(t *testing.T) {
-	// Case 1: no tools -> inject bash + read
+func TestOpenCodeFingerprintTools(t *testing.T) {
+	// No caller tools -> append read + shell with the exact upstream definitions.
 	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	result := openCodeCloakDecoyTools(payload)
-
+	updated := payload
+	names := openCodeApplyFingerprintIfFree(true, &updated, false)
+	if len(names) != 0 {
+		t.Errorf("no caller tools should alias anything, got %v", names)
+	}
 	var body map[string]any
-	if err := json.Unmarshal(result, &body); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
+	if err := json.Unmarshal(updated, &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
 	}
 	tools, ok := body["tools"].([]any)
 	if !ok || len(tools) != 2 {
-		t.Errorf("expected 2 decoy tools, got %v", body["tools"])
+		t.Fatalf("expected 2 fingerprint tools, got %v", body["tools"])
 	}
-	names := make([]string, len(tools))
-	for i, tool := range tools {
-		tm := tool.(map[string]any)
-		fn := tm["function"].(map[string]any)
-		names[i] = fn["name"].(string)
+	for i, want := range []string{"read", "shell"} {
+		fn, ok := tools[i].(map[string]any)["function"].(map[string]any)
+		if !ok {
+			t.Fatalf("tool %d missing function wrapper: %v", i, tools[i])
+		}
+		if fn["name"] != want {
+			t.Errorf("tool %d name = %v, want %s", i, fn["name"], want)
+		}
+		params, _ := fn["parameters"].(map[string]any)
+		if params == nil || params["type"] != "object" {
+			t.Errorf("tool %s parameters = %v, want object schema", want, fn["parameters"])
+		}
+		if _, has := params["required"]; !has {
+			t.Errorf("tool %s parameters missing required list", want)
+		}
 	}
-	if names[0] != "bash" || names[1] != "read" {
-		t.Errorf("expected [bash, read], got %v", names)
+	if _, has := body["tool_choice"]; has {
+		t.Errorf("chat tool_choice should stay unset, got %v", body["tool_choice"])
 	}
+}
 
-	// Case 2: already has bash -> only inject read
-	payload2 := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"bash","description":"existing"}}]}`)
-	result2 := openCodeCloakDecoyTools(payload2)
-
-	var body2 map[string]any
-	json.Unmarshal(result2, &body2)
-	tools2 := body2["tools"].([]any)
-	if len(tools2) != 2 {
-		t.Errorf("expected 2 tools (bash + read), got %d", len(tools2))
+func TestOpenCodeFingerprintAliasesConflictingCallerTool(t *testing.T) {
+	// A caller tool named exactly "shell" with a different definition must be
+	// aliased, so the official definition can be appended without a duplicate.
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"shell","description":"caller","parameters":{"type":"object"}}}]}`)
+	updated := payload
+	names := openCodeApplyFingerprintIfFree(true, &updated, false)
+	if names["shell_client"] != "shell" {
+		t.Fatalf("expected shell_client -> shell, got %v", names)
 	}
+	var body map[string]any
+	if err := json.Unmarshal(updated, &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tool := range body["tools"].([]any) {
+		fn, _ := tool.(map[string]any)["function"].(map[string]any)
+		if name, ok := fn["name"].(string); ok {
+			got[name] = true
+		}
+	}
+	if !got["shell"] || !got["shell_client"] || !got["read"] {
+		t.Errorf("tools = %v, want shell + shell_client + read", got)
+	}
+}
 
-	// Case 3: has both bash and read -> no injection
-	payload3 := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"bash","description":"e"}},{"type":"function","function":{"name":"read","description":"e"}}]}`)
-	result3 := openCodeCloakDecoyTools(payload3)
+func TestOpenCodeFingerprintResponsesTools(t *testing.T) {
+	// Flat Responses tools get the fingerprint too, and tool_choice defaults to auto.
+	payload := []byte(`{"input":[{"type":"message","role":"user","content":"hi"}]}`)
+	updated := payload
+	names := openCodeApplyFingerprintIfFree(true, &updated, true)
+	if len(names) != 0 {
+		t.Errorf("unexpected aliases: %v", names)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(updated, &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 fingerprint tools, got %v", body["tools"])
+	}
+	for i, want := range []string{"read", "shell"} {
+		if tools[i].(map[string]any)["name"] != want {
+			t.Errorf("tool %d = %v, want flat name %s", i, tools[i], want)
+		}
+	}
+	if body["tool_choice"] != "auto" {
+		t.Errorf("tool_choice = %v, want auto", body["tool_choice"])
+	}
+}
 
-	var body3 map[string]any
-	json.Unmarshal(result3, &body3)
-	tools3 := body3["tools"].([]any)
-	if len(tools3) != 2 {
-		t.Errorf("expected 2 tools (no injection), got %d", len(tools3))
+func TestOpenCodeRestoreToolNames(t *testing.T) {
+	names := map[string]string{"shell_client": "shell"}
+	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"shell_client"}}]}}]}`)
+	updated := helps.RestoreOpenCodeToolNames(payload, names)
+	if !strings.Contains(string(updated), `"name":"shell"`) {
+		t.Errorf("restored payload = %s, want name shell", updated)
+	}
+	if strings.Contains(string(updated), "shell_client") {
+		t.Errorf("alias leaked into restored payload: %s", updated)
+	}
+	// No names -> untouched.
+	same := helps.RestoreOpenCodeToolNames(payload, nil)
+	if string(same) != string(payload) {
+		t.Errorf("empty map should be a no-op, got %s", same)
 	}
 }
 
@@ -262,7 +322,7 @@ func TestOpenCodeExecutorHeaders(t *testing.T) {
 			"base_url":                  server.URL,
 			"api_key":                   "test",
 			"header:Authorization":      "Bearer public",
-			"header:User-Agent":         openCodeUA,
+			"header:User-Agent":         openCodeFreeUA,
 			"header:x-opencode-client":  "desktop",
 			"header:x-opencode-project": "global",
 		},
@@ -279,8 +339,8 @@ func TestOpenCodeExecutorHeaders(t *testing.T) {
 	}
 
 	// Check User-Agent
-	if ua := gotHeaders.Get("User-Agent"); ua != openCodeUA {
-		t.Errorf("User-Agent = %q, want %q", ua, openCodeUA)
+	if ua := gotHeaders.Get("User-Agent"); ua != openCodeFreeUA {
+		t.Errorf("User-Agent = %q, want %q", ua, openCodeFreeUA)
 	}
 
 	// Check Authorization
@@ -288,16 +348,24 @@ func TestOpenCodeExecutorHeaders(t *testing.T) {
 		t.Errorf("Authorization = %q, want 'Bearer public'", auth)
 	}
 
-	// Check session header
+	// Check session header and its v2 aliases
 	session := gotHeaders.Get("x-opencode-session")
 	if !strings.HasPrefix(session, "ses_") {
 		t.Errorf("x-opencode-session %q missing ses_ prefix", session)
 	}
+	if got := gotHeaders.Get("x-opencode-session-id"); got != session {
+		t.Errorf("x-opencode-session-id = %q, want %q", got, session)
+	}
+	if got := gotHeaders.Get("x-session-affinity"); got != session {
+		t.Errorf("x-session-affinity = %q, want %q", got, session)
+	}
+	if got := gotHeaders.Get("x-session-id"); got != session {
+		t.Errorf("x-session-id = %q, want %q", got, session)
+	}
 
-	// Check request ID
-	reqID := gotHeaders.Get("x-opencode-request")
-	if !strings.HasPrefix(reqID, "msg_") {
-		t.Errorf("x-opencode-request %q missing msg_ prefix", reqID)
+	// v1 x-opencode-request is rejected upstream with 403; it must not be sent.
+	if got := gotHeaders.Get("x-opencode-request"); got != "" {
+		t.Errorf("x-opencode-request = %q, want empty", got)
 	}
 
 	// Check other headers
@@ -325,7 +393,7 @@ func TestOpenCodeExecutorStreamHeaders(t *testing.T) {
 			"base_url":                  server.URL,
 			"api_key":                   "test",
 			"header:Authorization":      "Bearer public",
-			"header:User-Agent":         openCodeUA,
+			"header:User-Agent":         openCodeFreeUA,
 			"header:x-opencode-client":  "desktop",
 			"header:x-opencode-project": "global",
 		},
@@ -343,8 +411,8 @@ func TestOpenCodeExecutorStreamHeaders(t *testing.T) {
 	for range result.Chunks {
 	}
 
-	if ua := gotHeaders.Get("User-Agent"); ua != openCodeUA {
-		t.Errorf("User-Agent = %q, want %q", ua, openCodeUA)
+	if ua := gotHeaders.Get("User-Agent"); ua != openCodeFreeUA {
+		t.Errorf("User-Agent = %q, want %q", ua, openCodeFreeUA)
 	}
 	if auth := gotHeaders.Get("Authorization"); auth != "Bearer public" {
 		t.Errorf("Authorization = %q, want 'Bearer public'", auth)
