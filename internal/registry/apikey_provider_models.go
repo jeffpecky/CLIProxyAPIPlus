@@ -285,14 +285,16 @@ func openCodeGoFallbackModels() []*ModelInfo {
 	ids := []string{
 		"deepseek-flash",
 		"glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
-		"kimi-k2.7-code", "kimi-k2.6", "kimi-k3",
+		"kimi-k2.7-code", "kimi-k2.6", "kimi-k3", "kimi-k3.1-pro",
 		"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp",
 		"longcat-2.0", "mimo-v2.5", "mimo-v2.5-pro",
-		"minimax-m3", "minimax-m2.7", "minimax-m2.5",
+		"minimax-m3", "minimax-m2.7", "minimax-m2.5", "minimax-m3.1-flash",
 		"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
 		"hy4-preview", "hy3",
-		"grok-4.6", "gpt-5.6-luna",
+		"grok-4.6", "gpt-5.6-luna", "gemini-4-argon",
 		"muse-spark-1.2-contributor", "muse-spark-1.3-contributor",
+		"claude-haiku-5-5",
+		"step-5-preview", "iceman-contributor-free", "beam-free",
 	}
 	models := make([]*ModelInfo, 0, len(ids))
 	for _, id := range ids {

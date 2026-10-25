@@ -999,6 +999,11 @@ func (e *OpenCodeExecutor) executeChat(ctx context.Context, auth *cliproxyauth.A
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
 
+	// Claude-format free models are served only by /messages.
+	if e.freeTier && openCodeNeedsMessages(req.Model) {
+		return e.executeMessages(ctx, auth, req, opts, false)
+	}
+
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 
 	if openCodeIsMuseSpark(req.Model) {
@@ -1055,6 +1060,11 @@ func (e *OpenCodeExecutor) executeChatStream(ctx context.Context, auth *cliproxy
 	clientTool := extractClientTool(req.Metadata)
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
+
+	// Claude-format free models are served only by /messages.
+	if e.freeTier && openCodeNeedsMessages(req.Model) {
+		return e.executeMessagesStream(ctx, auth, req, opts, false)
+	}
 
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 

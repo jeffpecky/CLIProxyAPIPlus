@@ -239,6 +239,12 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 	clientTool := extractClientTool(req.Metadata)
 	injectOpenCodeGoHeaders(auth, opts.Headers, req.Payload, clientTool)
 
+	// Claude-format Go models answer ModelProtocolUnsupported on
+	// /chat/completions and are served only by /messages.
+	if openCodeGoNeedsMessages(req.Model) {
+		return e.executeMessages(ctx, auth, req, opts, true)
+	}
+
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 
 	// The relay's deepseek family rejects response_format with an opaque 400.
@@ -254,6 +260,12 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	clientTool := extractClientTool(req.Metadata)
 	injectOpenCodeGoHeaders(auth, opts.Headers, req.Payload, clientTool)
+
+	// Claude-format Go models answer ModelProtocolUnsupported on
+	// /chat/completions and are served only by /messages.
+	if openCodeGoNeedsMessages(req.Model) {
+		return e.executeMessagesStream(ctx, auth, req, opts, true)
+	}
 
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 
