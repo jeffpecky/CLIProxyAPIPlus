@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,69 @@ const (
 // knownFreeOpenCodeModels contains known free models without the "-free" suffix
 var knownFreeOpenCodeModels = map[string]bool{
 	"big-pickle": true,
+}
+
+// OpenCode free-tier reasoning levels, mirrored from 9router's thinkingLevels.js
+// and capabilities.js. Free models are fetched from the remote catalog, which
+// carries no capability metadata, so the levels are attached by model family.
+// Without this the thinking pipeline sees Thinking == nil and strips the
+// client's reasoning_effort entirely (#4761).
+var (
+	openCodeLevelsOpenAI     = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	openCodeLevelsFull       = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+	openCodeLevelsDeepSeekV4 = []string{
+		"none", "low", "medium", "high", "xhigh", "max",
+	}
+	// Generic deepseek ids (no dotted version) use the hiMax set: low/medium
+	// collapse to high and xhigh to max on the wire.
+	openCodeLevelsDeepSeekBase = []string{"none", "high", "max"}
+	// The free v4.1-flash id publishes low|high|max and forwards the level
+	// verbatim (no low→high collapse) (#313559f).
+	openCodeLevelsDeepSeekV41Free = []string{"low", "high", "max"}
+	openCodeLevelsKimi            = []string{"none", "low", "medium", "high", "max"}
+	// glm-5.3-flash cannot disable thinking, so its OpenAI enum loses "none".
+	openCodeLevelsGLMFlash = []string{"minimal", "low", "medium", "high", "xhigh"}
+	// mimo v2.5-pro rejects reasoning_effort "max" (probed live).
+	openCodeLevelsMimoV25Pro = []string{"none", "low", "medium", "high", "xhigh"}
+	// Generic reasoning ids without a format-specific level table (base set).
+	openCodeLevelsBase = []string{"none", "low", "medium", "high"}
+)
+
+var openCodeThinkingRules = []struct {
+	pattern *regexp.Regexp
+	levels  []string
+}{
+	{regexp.MustCompile(`(?i)mimo.*v2\.6`), openCodeLevelsFull},
+	{regexp.MustCompile(`(?i)mimo.*v2\.5-pro`), openCodeLevelsMimoV25Pro},
+	{regexp.MustCompile(`(?i)deepseek-v4\.1-flash-free`), openCodeLevelsDeepSeekV41Free},
+	{regexp.MustCompile(`(?i)deepseek-v4\.`), openCodeLevelsDeepSeekV4},
+	{regexp.MustCompile(`(?i)^deepseek`), openCodeLevelsDeepSeekBase},
+	{regexp.MustCompile(`(?i)^glm-5\.3-flash`), openCodeLevelsGLMFlash},
+	{regexp.MustCompile(`(?i)^kimi-`), openCodeLevelsKimi},
+	// Reasoning-capable free ids whose capabilities declare the generic OpenAI
+	// effort enum ("space-bunny & co", #4761).
+	{regexp.MustCompile(`(?i)^space-bunny`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^big-pickle$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^exo-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^fledge-alpha-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^longcat-`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^north-mini-code-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^ring-2\.6-1t-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^x-preview-f-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^muse-spark`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^mimo.*v2\.5-free$`), openCodeLevelsOpenAI},
+	{regexp.MustCompile(`(?i)^(?:ling|nemotron)-.*-free$`), openCodeLevelsBase},
+}
+
+// openCodeThinkingSupport returns the reasoning levels for a free OpenCode
+// model, or nil when the family is not a known reasoning model.
+func openCodeThinkingSupport(modelID string) *ThinkingSupport {
+	for _, rule := range openCodeThinkingRules {
+		if rule.pattern.MatchString(modelID) {
+			return &ThinkingSupport{Levels: append([]string(nil), rule.levels...)}
+		}
+	}
+	return nil
 }
 
 // openCodeModelsResponse represents the API response from opencode.ai
@@ -124,11 +188,12 @@ func FetchOpenCodeModels(ctx context.Context) error {
 			continue
 		}
 		model := &ModelInfo{
-			ID:      item.ID,
-			Object:  item.Object,
-			Created: item.Created,
-			OwnedBy: item.OwnedBy,
-			Type:    "opencode",
+			ID:       item.ID,
+			Object:   item.Object,
+			Created:  item.Created,
+			OwnedBy:  item.OwnedBy,
+			Type:     "opencode",
+			Thinking: openCodeThinkingSupport(item.ID),
 		}
 		models = append(models, model)
 	}

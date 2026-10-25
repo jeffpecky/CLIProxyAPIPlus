@@ -1088,6 +1088,8 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool, cfg *config.Config)
 		registry.StartModelsUpdater(context.Background())
 		registry.SetOpenCodeModelsEnabled(true)
 		registry.StartOpenCodeModelsUpdater(context.Background())
+		registry.SetKiloFreeModelsEnabled(true)
+		registry.StartKiloFreeModelsUpdater(context.Background())
 	}
 
 	// Start API-key provider model fetchers (NVIDIA, Cloudflare, OpenRouter, OpenCode Go).

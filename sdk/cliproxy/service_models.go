@@ -168,6 +168,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(s.fetchKiroModelsContext(ctx, a), excluded)
 	case "kilo":
 		models = applyExcludedModels(executor.FetchKiloModels(ctx, a, s.cfg), excluded)
+	case "kilo-free":
+		models = applyExcludedModels(registry.GetKiloFreeModelsFromRemote(), excluded)
 	case "gitlab":
 		models = applyExcludedModels(executor.GitLabModelsFromAuth(a), excluded)
 	case "codebuddy":
@@ -375,8 +377,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 
-	// OpenCode models are fetched asynchronously; don't unregister while pending.
-	if provider == "opencode" {
+	// Remote model catalogs are fetched asynchronously; don't unregister while pending.
+	if provider == "opencode" || (provider == "kilo-free" && models == nil) {
 		return
 	}
 

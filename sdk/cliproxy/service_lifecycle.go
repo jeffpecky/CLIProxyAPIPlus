@@ -114,6 +114,38 @@ func (s *Service) Run(ctx context.Context) error {
 			refreshOpenCodeAuths()
 		}
 
+		refreshKiloFreeAuths := func() {
+			seen := map[string]bool{}
+			for _, auth := range s.coreManager.List() {
+				if auth == nil || auth.Disabled || auth.Provider != "kilo-free" {
+					continue
+				}
+				seen[auth.ID] = true
+				s.registerModelsForAuth(ctx, auth)
+				s.coreManager.RefreshSchedulerEntry(auth.ID)
+			}
+			baseline := &coreauth.Auth{ID: "kilo-free", Provider: "kilo-free", Status: coreauth.StatusActive}
+			if _, ok := s.coreManager.GetByID(baseline.ID); !ok {
+				if _, err := s.coreManager.Register(ctx, baseline); err != nil {
+					log.Warnf("failed to register synthetic kilo-free auth for scheduler: %v", err)
+				}
+			}
+			if current, ok := s.coreManager.GetByID(baseline.ID); ok && current != nil {
+				seen[current.ID] = true
+				s.registerModelsForAuth(ctx, current)
+				s.coreManager.RefreshSchedulerEntry(current.ID)
+				return
+			}
+			if !seen[baseline.ID] {
+				s.registerModelsForAuth(ctx, baseline)
+				s.coreManager.RefreshSchedulerEntry(baseline.ID)
+			}
+		}
+		registry.SetKiloFreePostFetchHook(refreshKiloFreeAuths)
+		if registry.GetKiloFreeModelsFromRemote() != nil {
+			refreshKiloFreeAuths()
+		}
+
 		// Register post-fetch hook for API-key provider models (NVIDIA, OpenRouter, Cloudflare):
 		// after async fetch completes, re-register models for all matching auths so the
 		// scheduler picks them up and model routing can resolve the provider.

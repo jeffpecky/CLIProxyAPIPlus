@@ -216,6 +216,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"meta",
 		"openai-compatibility",
 		"ollama-local",
+		"kilo-free",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
 	for _, provider := range providers {
@@ -304,6 +305,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(cfg))
 	case "kilo":
 		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(cfg))
+	case "kilo-free":
+		s.coreManager.RegisterExecutor(executor.NewKiloFreeExecutor(cfg))
 	case "cursor":
 		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(cfg))
 	case "github-copilot":

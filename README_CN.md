@@ -114,6 +114,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Grok Build 支持（OAuth 登录）
 - 新增 Qoder 支持（OAuth 登录）
+- 支持 Kilo AI 公共免费模型池（`kilo-free`），无需 Kilo 账号凭据
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -127,6 +128,12 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 支持 Qoder 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
+
+Kilo 公共免费池与需要账号凭据的 `kilo` 提供商相互独立。程序会从
+Kilo 公共网关获取模型清单，并只保留标记为 `isFree` 的条目；调用时使用
+`kilo-free/` 前缀区分免费池模型与账号模型，使用 OpenAI 兼容的聊天接口，
+且不转发 API 凭据。Kilo 说明免费池提示词可能会被记录并用于改进服务，
+请勿发送敏感信息。可用性及免费池条款由 Kilo 决定，并可能发生变化。
 
 ## 新手入门
 

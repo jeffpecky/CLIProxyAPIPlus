@@ -120,6 +120,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
 - Qoder support via OAuth login
+- Kilo AI's public free-model pool (`kilo-free`) without Kilo account credentials
 - Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
@@ -134,6 +135,15 @@ PackyCode provides special discounts for our software users: register using <a h
 - Qoder multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
+
+The public Kilo free pool is separate from the authenticated `kilo` account
+provider. Its model catalog is fetched from Kilo's public gateway and filtered
+to entries marked `isFree`; free-pool model IDs use the `kilo-free/` prefix to
+distinguish them from account-backed Kilo models. Requests use the gateway's
+OpenAI-compatible chat endpoint without forwarding API credentials.
+Kilo states that prompts sent to its free pool may be logged and used to
+improve its services; do not send sensitive data. Availability and free-pool
+terms are controlled by Kilo and may change.
 
 ## Getting Started
 

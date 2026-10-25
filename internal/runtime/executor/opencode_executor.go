@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	codexopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
@@ -197,7 +199,142 @@ func openCodeNativeSession(headers http.Header) string {
 	return ""
 }
 
-// openCodeResolveSession resolves a stable session identity from the request context.
+// OpenCode free tier quota is accounted per x-opencode-session id (on top of
+// IP-based limits; upstream issue decolua/9router#5128): once a session's
+// window is spent, replaying the same id only collects 429 FreeUsageLimitError
+// answers. Canonical sessions are therefore bound through a small state map
+// that (a) keeps one stable canonical session per resolved identity — minting
+// a fresh id for every request burns the free window faster — and (b) swaps to
+// a newly minted session when measured usage crosses a threshold or a
+// FreeUsageLimitError lands, so the next request opens a fresh quota window.
+const (
+	// Idle entries older than this are candidates for the lazy sweep.
+	openCodeSessionIdleTTL = 6 * time.Hour
+	// Hard ceiling for tracked identities; the sweep runs before growth.
+	openCodeSessionStatesCap = 2048
+)
+
+// openCodeSessionProactiveRotate is the measured request count after which a
+// canonical session is swapped for a freshly minted one, ahead of the upstream
+// per-session limit. Kept high on purpose: rapid session churn is itself a
+// relay fingerprint — the real CLI holds one long-lived session per
+// conversation — so rotation must stay rare relative to a session's life.
+var openCodeSessionProactiveRotate = 50
+
+type openCodeSessionEntry struct {
+	upstream string
+	used     int
+	lastUsed time.Time
+}
+
+var (
+	openCodeSessionStateMu sync.Mutex
+	openCodeSessionStates  = map[string]*openCodeSessionEntry{}
+)
+
+// openCodeEffectiveSession resolves the session id to actually send upstream
+// for a raw resolved identity: the stable canonical id, counted per request,
+// rotated proactively once the measured usage crosses the threshold.
+func openCodeEffectiveSession(logicalID string) string {
+	if logicalID == "" {
+		return ""
+	}
+	openCodeSessionStateMu.Lock()
+	defer openCodeSessionStateMu.Unlock()
+	entry := openCodeSessionStates[logicalID]
+	if entry == nil {
+		if len(openCodeSessionStates) >= openCodeSessionStatesCap {
+			openCodeReapSessionStatesLocked(time.Now())
+		}
+		entry = &openCodeSessionEntry{upstream: logicalID, lastUsed: time.Now()}
+		openCodeSessionStates[logicalID] = entry
+	} else {
+		entry.lastUsed = time.Now()
+	}
+	entry.used++
+	if entry.used < openCodeSessionProactiveRotate {
+		return entry.upstream
+	}
+	entry.used = 0
+	entry.upstream = openCodeGenerateSessionId()
+	log.Debugf("opencode executor: proactive session rotation after %d measured requests", openCodeSessionProactiveRotate)
+	return entry.upstream
+}
+
+// openCodeReapSessionStatesLocked drops idle entries and, while still at or
+// above the hard cap, the least recently used ones. Caller must hold the
+// state mutex.
+func openCodeReapSessionStatesLocked(now time.Time) {
+	deadline := now.Add(-openCodeSessionIdleTTL)
+	for id, entry := range openCodeSessionStates {
+		if entry.lastUsed.Before(deadline) {
+			delete(openCodeSessionStates, id)
+		}
+	}
+	for len(openCodeSessionStates) >= openCodeSessionStatesCap {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, entry := range openCodeSessionStates {
+			if oldestID == "" || entry.lastUsed.Before(oldestAt) {
+				oldestID, oldestAt = id, entry.lastUsed
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(openCodeSessionStates, oldestID)
+	}
+}
+
+// isOpenCodeFreeUsageLimitError reports whether err is the per-session free
+// quota wall (429 FreeUsageLimitError): the window for the canonical session
+// id is spent and retrying the same id cannot recover by itself.
+func isOpenCodeFreeUsageLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se statusErr
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.code == http.StatusTooManyRequests &&
+		strings.Contains(strings.ToLower(se.msg), "freeusagelimit")
+}
+
+// openCodeRotateOnFreeUsageLimit burns the canonical session the last request
+// used so the next request (typically the single recovery retry) opens a fresh
+// free-quota window. The burned id is the cached attribute session, falling
+// back to deterministic resolution (native downstream header) when the auth
+// carries no cache. Auth attributes are left untouched: the next injection
+// re-derives the session and persists the rotated id together with aliases.
+func openCodeRotateOnFreeUsageLimit(auth *cliproxyauth.Auth, headers http.Header, payload []byte, clientTool string) {
+	burned := ""
+	if auth != nil && auth.Attributes != nil {
+		burned = auth.Attributes["header:"+openCodeSessionHeader]
+	}
+	if burned == "" {
+		burned = openCodeResolveSession(headers, payload, auth, clientTool)
+	}
+	if burned == "" {
+		return
+	}
+	fresh := openCodeGenerateSessionId()
+	openCodeSessionStateMu.Lock()
+	defer openCodeSessionStateMu.Unlock()
+	entry := openCodeSessionStates[burned]
+	if entry == nil {
+		entry = &openCodeSessionEntry{upstream: fresh, lastUsed: time.Now()}
+		openCodeSessionStates[burned] = entry
+	} else {
+		entry.upstream = fresh
+		entry.used = 0
+		entry.lastUsed = time.Now()
+	}
+}
+
+// openCodeResolveSession resolves a stable, raw session identity from the
+// request context. Free-lane callers feed the result through
+// openCodeEffectiveSession for usage counting and rotation.
 //
 // Resolution priority:
 //  1. Native x-opencode-session header (authoritative if present and valid format)
@@ -279,6 +416,152 @@ func openCodeDeriveRequestId(sessionId string, payload []byte) string {
 // openCodeIsMuseSpark returns true when the model should use /responses.
 func openCodeIsMuseSpark(model string) bool {
 	return openCodeMuseSparkRe.MatchString(model)
+}
+
+// openCodeGetThinkingLevels returns supported thinking levels for an OpenCode model
+// from the model registry. Returns nil if not found or not configured.
+func openCodeGetThinkingLevels(model string) []string {
+	// Strip thinking suffix like (high), (medium), etc.
+	baseModel := model
+	if idx := strings.LastIndex(model, "("); idx != -1 && strings.HasSuffix(model, ")") {
+		baseModel = model[:idx]
+	}
+
+	info := registry.GetGlobalRegistry().GetModelInfo(baseModel, "opencode")
+	if info != nil && info.Thinking != nil && len(info.Thinking.Levels) > 0 {
+		return info.Thinking.Levels
+	}
+	// Also try without provider prefix
+	if !strings.HasPrefix(baseModel, "opencode/") {
+		info = registry.GetGlobalRegistry().GetModelInfo("opencode/"+baseModel, "opencode")
+		if info != nil && info.Thinking != nil && len(info.Thinking.Levels) > 0 {
+			return info.Thinking.Levels
+		}
+	}
+	return nil
+}
+
+// normalizeOpencodeReasoning normalizes reasoning_effort to the OpenCode free-tier
+// expected format. The free backend validates reasoning_effort against the plain
+// OpenAI enum (none|minimal|low|medium|high|xhigh|max) and answers 400 for
+// unsupported values. This function clamps the effort to supported levels and
+// converts to reasoning:{effort,summary} format.
+func normalizeOpencodeReasoning(model string, body map[string]any) {
+	// Extract reasoning_effort from body or existing reasoning object
+	var requestedEffort string
+	if v, ok := body["reasoning_effort"].(string); ok {
+		requestedEffort = v
+	} else if reasoning, ok := body["reasoning"].(map[string]any); ok {
+		if v, ok := reasoning["effort"].(string); ok {
+			requestedEffort = v
+		}
+	}
+	if requestedEffort == "" {
+		return
+	}
+
+	// "auto" is not supported by the free backend; drop it entirely
+	if strings.EqualFold(requestedEffort, "auto") {
+		delete(body, "reasoning_effort")
+		return
+	}
+
+	supportedLevels := openCodeGetThinkingLevels(model)
+	effort := strings.ToLower(strings.TrimSpace(requestedEffort))
+
+	// Clamp effort to supported levels
+	if len(supportedLevels) > 0 {
+		// Check if requested effort is supported
+		supported := false
+		for _, lvl := range supportedLevels {
+			if strings.EqualFold(lvl, effort) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			// Clamp: max/ultra -> max or xhigh, then high, then first available
+			if effort == "max" || effort == "ultra" {
+				for _, lvl := range supportedLevels {
+					if strings.EqualFold(lvl, "max") {
+						effort = "max"
+						supported = true
+						break
+					}
+				}
+				if !supported {
+					for _, lvl := range supportedLevels {
+						if strings.EqualFold(lvl, "xhigh") {
+							effort = "xhigh"
+							supported = true
+							break
+						}
+					}
+				}
+				if !supported {
+					for _, lvl := range supportedLevels {
+						if strings.EqualFold(lvl, "high") {
+							effort = "high"
+							supported = true
+							break
+						}
+					}
+				}
+			} else if effort == "xhigh" {
+				for _, lvl := range supportedLevels {
+					if strings.EqualFold(lvl, "xhigh") {
+						supported = true
+						break
+					}
+				}
+				if !supported {
+					for _, lvl := range supportedLevels {
+						if strings.EqualFold(lvl, "high") {
+							effort = "high"
+							supported = true
+							break
+						}
+					}
+				}
+			} else if effort == "high" {
+				for _, lvl := range supportedLevels {
+					if strings.EqualFold(lvl, "high") {
+						supported = true
+						break
+					}
+				}
+				if !supported && len(supportedLevels) > 0 {
+					// Fall back to highest supported level
+					effort = supportedLevels[len(supportedLevels)-1]
+				}
+			}
+		}
+	}
+
+	// Build reasoning object, preserving existing fields except effort
+	reasoning := map[string]any{"effort": effort}
+	if existing, ok := body["reasoning"].(map[string]any); ok {
+		for k, v := range existing {
+			if k != "effort" {
+				reasoning[k] = v
+			}
+		}
+	}
+	if _, hasSummary := reasoning["summary"]; !hasSummary {
+		reasoning["summary"] = "auto"
+	}
+	body["reasoning"] = reasoning
+	delete(body, "reasoning_effort")
+}
+
+// dropAdaptiveReasoningEffort removes reasoning_effort: "auto" which the
+// OpenCode free backend rejects with 400 "Invalid option".
+func dropAdaptiveReasoningEffort(body map[string]any) {
+	if body != nil {
+		if v, ok := body["reasoning_effort"].(string); ok && strings.EqualFold(v, "auto") {
+			delete(body, "reasoning_effort")
+		}
+	}
 }
 
 // openCodeChatToResponses converts a Chat Completions body to Responses API format.
@@ -409,6 +692,16 @@ func openCodeChatToResponses(payload []byte) []byte {
 		out["max_output_tokens"] = v
 	} else if v, ok := body["max_tokens"]; ok {
 		out["max_output_tokens"] = v
+	}
+
+	// Responses takes thinking as reasoning:{effort,summary}. Carry the Chat
+	// fields through so normalizeOpencodeReasoning can rewrite them at this
+	// boundary instead of silently dropping the client's effort.
+	if v, ok := body["reasoning_effort"]; ok {
+		out["reasoning_effort"] = v
+	}
+	if v, ok := body["reasoning"]; ok {
+		out["reasoning"] = v
 	}
 
 	out["stream"] = true
@@ -563,15 +856,17 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	// User-Agent: OpenCode v2 client fingerprint for free-tier validation
 	req.Header.Set("User-Agent", openCodeFreeUA)
 
-	// Resolve session
-	resolvedSession := openCodeResolveSession(req.Header, nil, auth, openCodeFreeClient)
-	if req.Header.Get(openCodeSessionHeader) == "" {
-		req.Header.Set(openCodeSessionHeader, resolvedSession)
+	// Resolve session (rotation-aware: measured usage may substitute a fresh id)
+	effectiveSession := req.Header.Get(openCodeSessionHeader)
+	if effectiveSession == "" {
+		resolvedSession := openCodeResolveSession(req.Header, nil, auth, openCodeFreeClient)
+		effectiveSession = openCodeEffectiveSession(resolvedSession)
+		req.Header.Set(openCodeSessionHeader, effectiveSession)
 	}
 
 	// v2 identity: x-opencode-request is v1-only and now answered with 403.
 	req.Header.Del("x-opencode-request")
-	openCodeSetSessionHeaders(req.Header, resolvedSession)
+	openCodeSetSessionHeaders(req.Header, effectiveSession)
 
 	if req.Header.Get("x-opencode-project") == "" {
 		req.Header.Set("x-opencode-project", "global")
@@ -628,11 +923,23 @@ func injectOpenCodeHeaders(auth *cliproxyauth.Auth, headers http.Header, payload
 	auth.Attributes["header:Authorization"] = "Bearer public"
 	auth.Attributes["header:User-Agent"] = openCodeFreeUA
 
-	// Resolve session
-	sessionID := auth.Attributes["header:"+openCodeSessionHeader]
-	if sessionID == "" {
-		sessionID = openCodeResolveSession(headers, payload, auth, clientTool)
+	// Resolve session: the attribute cache keeps one stable canonical session
+	// per auth, while the rotation state counts measured usage and may
+	// substitute a freshly minted id (proactively, or after a 429 rotation).
+	prev := auth.Attributes["header:"+openCodeSessionHeader]
+	var sessionID string
+	if prev == "" {
+		sessionID = openCodeEffectiveSession(openCodeResolveSession(headers, payload, auth, clientTool))
+	} else {
+		sessionID = openCodeEffectiveSession(prev)
+	}
+	if sessionID != prev {
 		auth.Attributes["header:"+openCodeSessionHeader] = sessionID
+		for _, name := range []string{"x-opencode-session-id", "x-session-affinity", "x-session-id"} {
+			if cur := auth.Attributes["header:"+name]; cur == "" || cur == prev {
+				auth.Attributes["header:"+name] = sessionID
+			}
+		}
 	}
 
 	// v2 identity: x-opencode-request is v1-only and now answered with 403.
@@ -676,7 +983,18 @@ func (e *OpenCodeExecutor) normalizeToOpenAI(ctx context.Context, req *cliproxye
 }
 
 // Execute performs a non-streaming chat completion request to OpenCode.
+// On 429 FreeUsageLimitError the canonical session is rotated once and the
+// request retried on a fresh quota window; a second 429 surfaces as-is.
 func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	resp, err := e.executeChat(ctx, auth, req, opts)
+	if e.freeTier && isOpenCodeFreeUsageLimitError(err) {
+		openCodeRotateOnFreeUsageLimit(auth, opts.Headers, req.Payload, extractClientTool(req.Metadata))
+		resp, err = e.executeChat(ctx, auth, req, opts)
+	}
+	return resp, err
+}
+
+func (e *OpenCodeExecutor) executeChat(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	clientTool := extractClientTool(req.Metadata)
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
@@ -688,9 +1006,30 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return e.executeResponses(ctx, auth, req, opts, responseFormat)
 	}
 
+	// Chat Completions lane: the free backend validates reasoning_effort against
+	// the plain OpenAI enum and answers 400 "Invalid option" for "auto" (adaptive
+	// thinking arrives as auto). Drop it and let upstream choose its default.
+	// The reasoning:{effort,summary} rewrite is Responses-only upstream.
+	if e.freeTier {
+		var body map[string]any
+		if json.Unmarshal(req.Payload, &body) == nil {
+			dropAdaptiveReasoningEffort(body)
+			if out, err := json.Marshal(body); err == nil {
+				req.Payload = out
+			}
+		}
+	}
+
 	// Force stream + free-tier fingerprint tools (chat/completions path)
 	req.Payload = openCodeForceStream(req.Payload)
 	toolNames := openCodeApplyFingerprintIfFree(e.freeTier, &req.Payload, false)
+
+	// Inject reasoning_content placeholder for providers that require it
+	// (DeepSeek, Kimi, MiniMax, ...) for multi-turn chats.
+	if e.freeTier {
+		req.Payload = OpenCodeMaybeInjectReasoningContent(e.cfg, e.Identifier(), req.Model, req.Payload)
+	}
+
 	resp, err := e.OpenAICompatExecutor.Execute(ctx, auth, req, opts)
 	if err != nil {
 		return resp, err
@@ -700,7 +1039,19 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 // ExecuteStream performs a streaming chat completion request to OpenCode.
+// Same session recovery as Execute: a pre-stream 429 FreeUsageLimitError has
+// emitted no chunk yet, so one rotation-and-retry attempt stays safe; a
+// second 429 surfaces as-is.
 func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	res, err := e.executeChatStream(ctx, auth, req, opts)
+	if e.freeTier && isOpenCodeFreeUsageLimitError(err) {
+		openCodeRotateOnFreeUsageLimit(auth, opts.Headers, req.Payload, extractClientTool(req.Metadata))
+		res, err = e.executeChatStream(ctx, auth, req, opts)
+	}
+	return res, err
+}
+
+func (e *OpenCodeExecutor) executeChatStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	clientTool := extractClientTool(req.Metadata)
 	headers := opts.Headers
 	injectOpenCodeHeaders(auth, headers, req.Payload, clientTool)
@@ -712,9 +1063,28 @@ func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		return e.executeResponsesStream(ctx, auth, req, opts, responseFormat)
 	}
 
+	// Chat Completions lane: drop adaptive reasoning_effort ("auto"); the free
+	// backend rejects it with 400 "Invalid option". See Execute above.
+	if e.freeTier {
+		var body map[string]any
+		if json.Unmarshal(req.Payload, &body) == nil {
+			dropAdaptiveReasoningEffort(body)
+			if out, err := json.Marshal(body); err == nil {
+				req.Payload = out
+			}
+		}
+	}
+
 	// Force stream + free-tier fingerprint tools (chat/completions path)
 	req.Payload = openCodeForceStream(req.Payload)
 	toolNames := openCodeApplyFingerprintIfFree(e.freeTier, &req.Payload, false)
+
+	// Inject reasoning_content placeholder for providers that require it
+	// (DeepSeek, Kimi, MiniMax, ...) for multi-turn chats.
+	if e.freeTier {
+		req.Payload = OpenCodeMaybeInjectReasoningContent(e.cfg, e.Identifier(), req.Model, req.Payload)
+	}
+
 	res, err := e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
 		return res, err
@@ -765,6 +1135,25 @@ func (e *OpenCodeExecutor) executeResponses(ctx context.Context, auth *cliproxya
 	if body == nil {
 		body = req.Payload
 	}
+
+	// Normalize reasoning_effort for OpenCode free-tier Responses path
+	if e.freeTier {
+		var bodyMap map[string]any
+		if json.Unmarshal(body, &bodyMap) == nil {
+			normalizeOpencodeReasoning(req.Model, bodyMap)
+			dropAdaptiveReasoningEffort(bodyMap)
+			if out, err := json.Marshal(bodyMap); err == nil {
+				body = out
+			}
+		}
+	}
+
+	// Inject reasoning_content placeholder for providers that require it
+	// (DeepSeek, Kimi, MiniMax, ...) for multi-turn chats.
+	if e.freeTier {
+		body = OpenCodeMaybeInjectReasoningContent(e.cfg, e.Identifier(), req.Model, body)
+	}
+
 	var toolNames map[string]string
 	if e.freeTier {
 		body, toolNames = helps.ApplyOpenCodeFingerprintTools(body, true)
@@ -829,6 +1218,25 @@ func (e *OpenCodeExecutor) executeResponsesStream(ctx context.Context, auth *cli
 	if body == nil {
 		body = req.Payload
 	}
+
+	// Normalize reasoning_effort for OpenCode free-tier Responses path
+	if e.freeTier {
+		var bodyMap map[string]any
+		if json.Unmarshal(body, &bodyMap) == nil {
+			normalizeOpencodeReasoning(req.Model, bodyMap)
+			dropAdaptiveReasoningEffort(bodyMap)
+			if out, err := json.Marshal(bodyMap); err == nil {
+				body = out
+			}
+		}
+	}
+
+	// Inject reasoning_content placeholder for providers that require it
+	// (DeepSeek, Kimi, MiniMax, ...) for multi-turn chats.
+	if e.freeTier {
+		body = OpenCodeMaybeInjectReasoningContent(e.cfg, e.Identifier(), req.Model, body)
+	}
+
 	var toolNames map[string]string
 	if e.freeTier {
 		body, toolNames = helps.ApplyOpenCodeFingerprintTools(body, true)

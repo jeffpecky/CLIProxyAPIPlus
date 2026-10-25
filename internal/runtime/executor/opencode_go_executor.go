@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -31,6 +33,9 @@ var openCodeGoResponsesOnlyModels = map[string]bool{
 	"muse-spark-1.2-contributor": true,
 	"muse-spark-1.3-contributor": true,
 }
+
+// openCodeGoDeepSeekRe matches the relay's deepseek family.
+var openCodeGoDeepSeekRe = regexp.MustCompile(`(?i)^deepseek`)
 
 // OpenCodeGoExecutor executes against OpenCode Go with a real subscription API key.
 // It reuses OpenCode session/header identity but does not force free-tier decoy tools.
@@ -68,13 +73,62 @@ func openCodeGoResponsesURL(auth *cliproxyauth.Auth) string {
 	return base + "/responses"
 }
 
-func openCodeGoNeedsResponses(model string) bool {
+// openCodeGoBaseModelID strips an "opencode-go/" prefix and any "(level)" /
+// " level" suffix so capability checks see the upstream id.
+func openCodeGoBaseModelID(model string) string {
 	baseModel := strings.TrimSpace(model)
 	if i := strings.IndexAny(baseModel, "( "); i >= 0 {
 		baseModel = strings.TrimSpace(baseModel[:i])
 	}
-	baseModel = strings.TrimPrefix(baseModel, "opencode-go/")
+	return strings.TrimPrefix(baseModel, "opencode-go/")
+}
+
+func openCodeGoNeedsResponses(model string) bool {
+	baseModel := openCodeGoBaseModelID(model)
 	return openCodeGoResponsesOnlyModels[baseModel] || openCodeIsMuseSpark(baseModel)
+}
+
+// openCodeGoStripUnsupportedParams mirrors 9router's paramSupport rule for the
+// OpenCode Go relay: its deepseek family rejects `response_format` (both
+// json_schema and json_object) with a bare 400 that names neither the field nor
+// the reason, so a client cannot classify it and keeps re-sending. Every other
+// family on the same relay accepts the field.
+func openCodeGoStripUnsupportedParams(model string, payload []byte) []byte {
+	if payload == nil || !openCodeGoDeepSeekRe.MatchString(openCodeGoBaseModelID(model)) {
+		return payload
+	}
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil {
+		return payload
+	}
+	if _, ok := body["response_format"]; !ok {
+		return payload
+	}
+	delete(body, "response_format")
+	out, err := json.Marshal(body)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// normalizeResponsesReasoning nests Chat-shaped thinking fields into the
+// Responses shape. The Go /responses relay answers 503 "Endpoint is
+// unavailable" for the flat reasoning_effort field but accepts
+// reasoning:{effort,summary} (#3014).
+func normalizeResponsesReasoning(body map[string]any) {
+	if body == nil {
+		return
+	}
+	if effort, ok := body["reasoning_effort"].(string); ok && body["reasoning"] == nil {
+		body["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
+	}
+	if reasoning, ok := body["reasoning"].(map[string]any); ok {
+		if summary, _ := reasoning["summary"].(string); summary == "" {
+			reasoning["summary"] = "auto"
+		}
+	}
+	delete(body, "reasoning_effort")
 }
 
 func applyOpenCodeGoAuthHeaders(req *http.Request, auth *cliproxyauth.Auth) {
@@ -187,6 +241,9 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 
+	// The relay's deepseek family rejects response_format with an opaque 400.
+	req.Payload = openCodeGoStripUnsupportedParams(req.Model, req.Payload)
+
 	if openCodeGoNeedsResponses(req.Model) {
 		return e.executeResponses(ctx, auth, req, opts, responseFormat)
 	}
@@ -200,6 +257,8 @@ func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 
 	responseFormat := e.normalizeToOpenAI(ctx, &req, &opts)
 
+	req.Payload = openCodeGoStripUnsupportedParams(req.Model, req.Payload)
+
 	if openCodeGoNeedsResponses(req.Model) {
 		return e.executeResponsesStream(ctx, auth, req, opts, responseFormat)
 	}
@@ -211,6 +270,13 @@ func (e *OpenCodeGoExecutor) executeResponses(ctx context.Context, auth *cliprox
 	body := openCodeChatToResponses(req.Payload)
 	if body == nil {
 		body = req.Payload
+	}
+	var bodyMap map[string]any
+	if json.Unmarshal(body, &bodyMap) == nil {
+		normalizeResponsesReasoning(bodyMap)
+		if out, err := json.Marshal(bodyMap); err == nil {
+			body = out
+		}
 	}
 
 	url := openCodeGoResponsesURL(auth)
@@ -269,6 +335,13 @@ func (e *OpenCodeGoExecutor) executeResponsesStream(ctx context.Context, auth *c
 	body := openCodeChatToResponses(req.Payload)
 	if body == nil {
 		body = req.Payload
+	}
+	var bodyMap map[string]any
+	if json.Unmarshal(body, &bodyMap) == nil {
+		normalizeResponsesReasoning(bodyMap)
+		if out, err := json.Marshal(bodyMap); err == nil {
+			body = out
+		}
 	}
 
 	url := openCodeGoResponsesURL(auth)
