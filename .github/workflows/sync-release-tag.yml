@@ -37,7 +37,11 @@ jobs:
       - name: Fetch upstream tags
         run: |
           git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
-          git fetch upstream main --tags
+          # Force the fetch so fork-published release tags whose names collide
+          # with upstream tags (e.g. a fork v8.0.17 against upstream's own
+          # v8.0.17) do not abort the fetch with "would clobber existing tag".
+          # Only the ${UPSTREAM_TAG}-* fork tags and upstream/main are consumed.
+          git fetch upstream main --tags --force
 
       - name: Create and bind the fork release tag
         env:
