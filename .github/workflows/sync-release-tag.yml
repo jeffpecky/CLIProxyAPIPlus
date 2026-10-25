@@ -96,7 +96,7 @@ jobs:
             local title="$2"
             local run_id=""
 
-            for _ in $(seq 1 12); do
+            for _ in $(seq 1 24); do
               run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${workflow}" \
                 --event workflow_dispatch --limit 20 --json databaseId,displayTitle \
                 | jq -r --arg title "${title}" \
@@ -108,8 +108,11 @@ jobs:
               sleep 5
             done
 
-            echo "Unable to identify ${workflow} run for ${title}" >&2
-            return 1
+            # Both runs are already dispatched at this point; a failed run-id
+            # lookup only costs the step summary annotation, so it must not
+            # fail the whole tagging job.
+            echo "Warning: could not resolve the run id for ${workflow} (${title})." >&2
+            return 0
           }
 
           latest_fork_tag() {
